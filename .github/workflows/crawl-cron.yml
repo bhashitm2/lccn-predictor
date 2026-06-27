@@ -1,0 +1,55 @@
+name: Crawl & predict latest contest
+
+# The crawler runs HERE (GitHub Actions), not on the web host: a runner's IP can
+# reach LeetCode's Cloudflare-protected ranking API via curl_cffi, whereas many
+# cloud hosts (e.g. Render) get 403'd. It writes predictions straight to MongoDB
+# Atlas; the deployed API then serves those cached results.
+#
+# Required repository secret:
+#   LCCN_MONGODB_URI   the same MongoDB Atlas connection string the web host uses
+#
+# Times are UTC. LeetCode weekly ends ~04:00 UTC Sun; biweekly ~16:00 UTC Sat.
+# Re-runs are no-ops once the latest contest is already predicted.
+on:
+  schedule:
+    - cron: "30 4 * * 0"    # Sunday after weekly
+    - cron: "0 5 * * 0"     # retry / late ratings
+    - cron: "30 16 * * 6"   # Saturday after biweekly
+    - cron: "0 17 * * 6"    # retry
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Contest slug (blank = latest finished)"
+        required: false
+      limit:
+        description: "Top-N only (blank = full contest)"
+        required: false
+
+concurrency:
+  group: crawl-predict
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+      - name: Crawl + predict
+        env:
+          LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
+          LCCN_DB_NAME: lccn_predictor
+          SLUG: ${{ github.event.inputs.slug }}
+          LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          ARGS=""
+          [ -n "$LIMIT" ] && ARGS="--limit $LIMIT"
+          if [ -n "$SLUG" ]; then
+            python -m predictor.cli predict "$SLUG" $ARGS
+          else
+            python -m predictor.cli predict-latest $ARGS
+          fi
