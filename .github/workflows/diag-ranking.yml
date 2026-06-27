@@ -1,0 +1,36 @@
+name: Diag — can Actions reach the ranking API?
+
+# Throwaway diagnostic: checks whether a GitHub Actions runner's IP can reach
+# LeetCode's Cloudflare-protected contest ranking REST API. If this returns 200,
+# we can run the crawler from Actions (free, no proxy). Delete after use.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner public IP
+        run: curl -s https://api.ipify.org; echo
+
+      - name: Plain curl to ranking API (tests IP reputation)
+        run: |
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          code=$(curl -s -o /tmp/r.json -w "%{http_code}" -H "User-Agent: $UA" \
+            "https://leetcode.com/contest/api/ranking/weekly-contest-507/")
+          echo "ranking API HTTP: $code"
+          head -c 300 /tmp/r.json; echo
+
+      - name: curl_cffi (browser TLS impersonation) check
+        run: |
+          pip install --quiet curl_cffi
+          python - <<'PY'
+          from curl_cffi.requests import Session
+          s = Session(impersonate="chrome")
+          r = s.get("https://leetcode.com/contest/api/ranking/weekly-contest-507/")
+          print("curl_cffi HTTP:", r.status_code)
+          if r.status_code == 200:
+              print("user_num:", r.json().get("user_num"))
+          else:
+              print(r.text[:200])
+          PY
