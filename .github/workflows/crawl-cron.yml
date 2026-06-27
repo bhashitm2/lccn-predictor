@@ -24,6 +24,10 @@ on:
       limit:
         description: "Top-N only (blank = full contest)"
         required: false
+      force:
+        description: "Re-predict even if already done (true/false)"
+        required: false
+        default: "false"
 
 concurrency:
   group: crawl-predict
@@ -45,9 +49,11 @@ jobs:
           LCCN_DB_NAME: lccn_predictor
           SLUG: ${{ github.event.inputs.slug }}
           LIMIT: ${{ github.event.inputs.limit }}
+          FORCE: ${{ github.event.inputs.force }}
         run: |
           ARGS=""
-          [ -n "$LIMIT" ] && ARGS="--limit $LIMIT"
+          [ -n "$LIMIT" ] && ARGS="$ARGS --limit $LIMIT"
+          [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
           if [ -n "$SLUG" ]; then
             python -m predictor.cli predict "$SLUG" $ARGS
           else
