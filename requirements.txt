@@ -17,6 +17,8 @@ scipy==1.18.0
 beanie==2.0.0
 motor==3.7.1
 pymongo==4.17.0
+# Required by pymongo to parse mongodb+srv:// URIs (MongoDB Atlas).
+dnspython==2.8.0
 
 # HTTP crawler.
 # curl_cffi impersonates a real browser's TLS fingerprint — required because
