@@ -47,6 +47,12 @@ jobs:
         env:
           LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
           LCCN_DB_NAME: lccn_predictor
+          # Gentler ranking crawl: a full ~1,500-page contest at high concurrency
+          # gets throttled (403'd) by Cloudflare on the runner's IP, dropping pages.
+          # Lower concurrency + more retries trades speed for completeness.
+          LCCN_RANKING_CONCURRENCY: "4"
+          LCCN_RATING_CONCURRENCY: "8"
+          LCCN_HTTP_RETRY: "15"
           SLUG: ${{ github.event.inputs.slug }}
           LIMIT: ${{ github.event.inputs.limit }}
           FORCE: ${{ github.event.inputs.force }}
