@@ -6,13 +6,13 @@
 #   2. Push this repo to GitHub, then in Render: New > Blueprint > pick the repo.
 #   3. Set the env vars marked `sync: false` in the Render dashboard
 #      (LCCN_MONGODB_URI, LCCN_API_KEY, LCCN_CORS_ORIGINS).
-#   4. After deploy, set the GitHub Actions secrets so the cron can trigger
-#      predictions (see .github/workflows/predict-cron.yml).
+#   4. Add the LCCN_MONGODB_URI GitHub Actions secret so the crawler workflow
+#      (.github/workflows/crawl-cron.yml) can write predictions to Atlas.
 #
-# NOTE: Render's free web service spins down after ~15 min idle. That's fine —
-# the GitHub Actions cron wakes it twice a week to predict the latest contest,
-# and your website's reads wake it on demand. The in-process auto-predict
-# scheduler is therefore left OFF here (LCCN_AUTO_PREDICT_ENABLED=false).
+# NOTE: this web service only SERVES cached predictions — it never crawls
+# (LeetCode's Cloudflare 403s the ranking API from cloud-host IPs). The crawl
+# runs in GitHub Actions and writes to the same Atlas DB. Render's free service
+# spinning down when idle is therefore fine; reads wake it on demand.
 services:
   - type: web
     name: lccn-predictor

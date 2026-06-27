@@ -126,24 +126,36 @@ different origin can call the API directly.
 
 ## Deploy (free tier → paid later)
 
-A free-tier setup that costs nothing and scales to paid when you grow:
+```
+GitHub Actions (crawl) ──▶ MongoDB Atlas ──▶ web host (serve) ──▶ your website
+```
 
-1. **Database — MongoDB Atlas (free M0).** Create a cluster, allow network access,
-   copy the connection string.
+**Why split crawl and serve?** LeetCode's Cloudflare blocks the contest ranking API
+from many cloud-host IPs (Render etc. get 403). A **GitHub Actions runner's IP can
+reach it** via curl_cffi, so the crawl runs there and writes to Atlas; the web host
+only serves cached results. Fully free, fully automated, no proxy, no always-on PC.
+
+1. **Database — MongoDB Atlas (free M0).** Create a cluster; under **Network Access**
+   allow `0.0.0.0/0` (so both the web host and Actions can connect); copy the
+   `mongodb+srv://…` connection string.
 2. **API — Render (free web service).** Push this repo to GitHub, then in Render:
-   *New → Blueprint* and pick the repo ([`render.yaml`](render.yaml) is included).
-   Set these in the dashboard:
+   *New → Blueprint* → pick the repo ([`render.yaml`](render.yaml) is included). Set:
    - `LCCN_MONGODB_URI` = your Atlas string
    - `LCCN_API_KEY` = a secret (`openssl rand -hex 24`)
    - `LCCN_CORS_ORIGINS` = your website's origin, e.g. `https://your-site.com`
-3. **Scheduler — GitHub Actions cron (free).** Free hosts sleep when idle, so an
-   in-process scheduler won't fire reliably. Instead
-   [`.github/workflows/predict-cron.yml`](.github/workflows/predict-cron.yml) runs
-   after each contest, wakes the service, and calls the admin endpoint. Add repo
-   secrets `PREDICTOR_URL` (your Render URL) and `PREDICTOR_API_KEY` (= `LCCN_API_KEY`).
+
+   (`LCCN_PUBLIC_CRAWL_ENABLED` stays `false` — the host never crawls, it only serves.)
+3. **Crawler — GitHub Actions (free).**
+   [`.github/workflows/crawl-cron.yml`](.github/workflows/crawl-cron.yml) runs after
+   each contest, crawls via `python -m predictor.cli predict-latest`, and writes to
+   Atlas. Add **one** repo secret: `LCCN_MONGODB_URI` (same Atlas string). Trigger a
+   first run manually from the **Actions** tab (optionally with a `slug` / `limit`).
 
 That's it — your website calls `GET /api/v1/contest/{slug}/predict` and gets cached
-predictions; the cron keeps them fresh.
+predictions; the Actions cron keeps them fresh twice a week.
+
+> The CLI (`predictor/cli.py`) can also be run locally to crawl into any database:
+> `LCCN_MONGODB_URI=… python -m predictor.cli predict weekly-contest-507 --limit 1000`.
 
 **Moving to paid / always-on** (Render paid, Fly.io, a VPS, etc.): set
 `LCCN_AUTO_PREDICT_ENABLED=true` to use the built-in scheduler instead of (or
