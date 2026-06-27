@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Env & secrets
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local preview tooling (machine-specific paths)
+.claude/
+run_preview.py
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/

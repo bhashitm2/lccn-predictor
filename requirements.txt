@@ -1,0 +1,40 @@
+# Pinned to the exact versions used to develop & test this service
+# (verified on Python 3.13 in Docker and 3.14 locally). numpy/scipy require >=3.12.
+
+# Web framework
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
+starlette==1.3.1
+
+# Numerics (the Elo + FFT engine)
+numpy==2.5.0
+scipy==1.18.0
+# Numba is OPTIONAL: the FFT path uses SciPy, so the service runs without it.
+# It only accelerates the naive O(n^2) oracle. Uncomment if you want it.
+# numba
+
+# Database (Beanie 2.x uses pymongo's async driver)
+beanie==2.0.0
+motor==3.7.1
+pymongo==4.17.0
+
+# HTTP crawler.
+# curl_cffi impersonates a real browser's TLS fingerprint — required because
+# LeetCode's contest ranking REST API sits behind Cloudflare, which 403s plain
+# Python TLS clients (httpx/requests). httpx is still pulled in transitively by
+# FastAPI's test client.
+curl_cffi==0.15.0
+httpx==0.28.1
+
+# Config & logging
+pydantic==2.13.4
+pydantic-settings==2.14.2
+loguru==0.7.3
+
+# Scheduler (optional rating-cache warm-up)
+APScheduler==3.11.2
+
+# Tests
+pytest==9.1.1
+pytest-asyncio==1.4.0
+mongomock-motor==0.0.36

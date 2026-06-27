@@ -1,0 +1,42 @@
+name: Predict latest contest
+
+# Free-tier "scheduler": GitHub Actions runs on a cron (free for public repos),
+# wakes the (possibly sleeping) predictor service, and triggers prediction of the
+# most recently finished contest via the API-key-gated admin endpoint.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   PREDICTOR_URL      e.g. https://lccn-predictor.onrender.com
+#   PREDICTOR_API_KEY  must equal the service's LCCN_API_KEY
+#
+# Times are UTC. LeetCode weekly ends ~04:00 UTC Sun; biweekly ~16:00 UTC Sat.
+# Running on off-weeks is harmless: predict-latest is a no-op if the latest
+# contest is already predicted.
+on:
+  schedule:
+    - cron: "30 4 * * 0"    # Sunday 04:30 UTC (after weekly)
+    - cron: "30 5 * * 0"    # Sunday 05:30 UTC (retry / late ratings)
+    - cron: "30 16 * * 6"   # Saturday 16:30 UTC (after biweekly)
+    - cron: "30 17 * * 6"   # Saturday 17:30 UTC (retry)
+  workflow_dispatch:        # allow manual runs from the Actions tab
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the service (free tiers sleep when idle)
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+              "${{ secrets.PREDICTOR_URL }}/healthz" || true)
+            echo "healthz attempt $i -> $code"
+            [ "$code" = "200" ] && break
+            sleep 15
+          done
+
+      - name: Trigger prediction of the latest finished contest
+        run: |
+          resp=$(curl -s --max-time 120 -X POST \
+            -H "X-API-Key: ${{ secrets.PREDICTOR_API_KEY }}" \
+            "${{ secrets.PREDICTOR_URL }}/api/v1/admin/predict-latest")
+          echo "response: $resp"
+          echo "$resp" | grep -q '"triggered"' || { echo "trigger failed"; exit 1; }

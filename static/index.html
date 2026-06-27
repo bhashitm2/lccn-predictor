@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeetCode Contest Rating Predictor</title>
+  <style>
+    :root {
+      --bg: #0f1220; --panel: #181c2e; --panel-2: #20263d; --text: #e7e9f3;
+      --muted: #9aa3bf; --accent: #ffa116; --green: #2cbb5d; --red: #ef4743;
+      --border: #2a3050; --radius: 12px;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:#f5f6fa; --panel:#fff; --panel-2:#f0f2f8; --text:#1a1d2b;
+        --muted:#5b6072; --border:#e2e5ee;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 28px 18px 60px; }
+    h1 { font-size: 1.55rem; margin: 0 0 4px; }
+    h1 .lc { color: var(--accent); }
+    .sub { color: var(--muted); margin: 0 0 22px; font-size: .92rem; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; margin-bottom: 18px;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: .78rem; color: var(--muted); }
+    input {
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+      border-radius: 8px; padding: 9px 11px; font-size: .95rem; min-width: 180px;
+    }
+    input.small { min-width: 110px; }
+    button {
+      background: var(--accent); color: #1a1d2b; border: none; border-radius: 8px;
+      padding: 10px 18px; font-weight: 600; font-size: .95rem; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+    .status { margin-top: 14px; font-size: .9rem; color: var(--muted); min-height: 20px; }
+    .status.err { color: var(--red); }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .9rem; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.me { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+    .delta-up { color: var(--green); font-weight: 600; }
+    .delta-down { color: var(--red); font-weight: 600; }
+    .pill { font-size: .72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+    .pager { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+    .hint { font-size: .82rem; color: var(--muted); margin-top: 10px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1><span class="lc">LeetCode</span> Contest Rating Predictor</h1>
+    <p class="sub">Predicted rating changes from a contest slug — powered by a faithful
+      port of LeetCode's Elo algorithm (FFT-accelerated). API: <code>/api/v1/contest/{slug}/predict</code></p>
+
+    <div class="card">
+      <div class="row">
+        <div class="field">
+          <label>Contest slug</label>
+          <input id="slug" placeholder="weekly-contest-450" value="weekly-contest-450" />
+        </div>
+        <div class="field">
+          <label>Highlight user (optional)</label>
+          <input id="user" class="small" placeholder="username" />
+        </div>
+        <div class="field">
+          <label>Top-N only (optional)</label>
+          <input id="limit" class="small" type="number" min="1" placeholder="e.g. 1000" />
+        </div>
+        <button id="go">Predict</button>
+      </div>
+      <div id="status" class="status"></div>
+      <div class="hint">Tip: predictions are most accurate right after a contest ends,
+        before LeetCode publishes the official new ratings.</div>
+    </div>
+
+    <div class="card" id="resultsCard" style="display:none">
+      <div id="meta" class="sub" style="margin:0 0 6px"></div>
+      <div style="overflow-x:auto">
+        <table id="table">
+          <thead>
+            <tr>
+              <th class="num">Rank</th><th>User</th><th>Region</th>
+              <th class="num">Old</th><th class="num">Δ</th><th class="num">New</th>
+              <th class="num">Attended</th><th class="num">Score</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button id="prev">‹ Prev</button>
+        <span id="pageInfo" class="pill"></span>
+        <button id="next">Next ›</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Same-origin by default. Set window.API_BASE to call a remote predictor.
+    const API = (window.API_BASE || "").replace(/\/$/, "");
+    const $ = (id) => document.getElementById(id);
+    const PAGE_SIZE = 50;
+    let state = { slug: "", page: 1, total: 0 };
+
+    const setStatus = (msg, isErr = false) => {
+      const el = $("status");
+      el.textContent = msg;
+      el.className = "status" + (isErr ? " err" : "");
+    };
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    async function poll(slug) {
+      // Poll /status until the prediction is ready or fails.
+      for (let i = 0; i < 600; i++) {
+        const r = await fetch(`${API}/api/v1/contest/${encodeURIComponent(slug)}/status`);
+        const s = await r.json();
+        if (s.status === "done") return s;
+        if (s.status === "error") throw new Error(s.error || "prediction failed");
+        const crawled = s.crawled_ranking || 0;
+        const total = s.user_num || 0;
+        let msg;
+        if (s.status === "crawling") {
+          msg = `Crawling ranking… ${crawled}/${total || "?"}` +
+            (total ? ` (${Math.round(crawled / total * 100)}%)` : "");
+        } else if (s.status === "resolving") {
+          msg = `Resolving ${total || crawled} user ratings (batched GraphQL)… ` +
+            `this is the slow part for big contests.`;
+        } else if (s.status === "predicting") {
+          msg = "Running the Elo/FFT engine…";
+        } else {
+          msg = `Working… status=${s.status}`;
+        }
+        setStatus(msg);
+        await sleep(2000);
+      }
+      throw new Error("timed out waiting for prediction");
+    }
+
+    async function loadPage(slug, page) {
+      const limit = $("limit").value.trim();
+      const q = new URLSearchParams({ page, size: PAGE_SIZE });
+      if (limit) q.set("limit", limit);
+      const r = await fetch(`${API}/api/v1/contest/${encodeURIComponent(slug)}/predict?` + q);
+      if (r.status === 202) { await poll(slug); return loadPage(slug, page); }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }
+
+    function render(data) {
+      state.total = data.total;
+      const me = $("user").value.trim().toLowerCase();
+      const fmt = (x) => x == null ? "—" : Math.round(x);
+      $("tbody").innerHTML = data.records.map((rec) => {
+        const d = rec.delta_rating ?? 0;
+        const cls = d > 0 ? "delta-up" : d < 0 ? "delta-down" : "";
+        const sign = d > 0 ? "+" : "";
+        const isMe = me && (rec.username.toLowerCase() === me || rec.user_slug.toLowerCase() === me);
+        return `<tr class="${isMe ? "me" : ""}">
+          <td class="num">${rec.rank}</td>
+          <td>${rec.username}</td>
+          <td><span class="pill">${rec.data_region}</span></td>
+          <td class="num">${fmt(rec.old_rating)}</td>
+          <td class="num ${cls}">${sign}${d.toFixed(1)}</td>
+          <td class="num">${fmt(rec.new_rating)}</td>
+          <td class="num">${rec.attended_count ?? "—"}</td>
+          <td class="num">${rec.score}</td>
+        </tr>`;
+      }).join("");
+      const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+      $("meta").textContent = `${data.total.toLocaleString()} participants predicted for ${data.slug}`;
+      $("pageInfo").textContent = `Page ${data.page} / ${pages}`;
+      $("prev").disabled = data.page <= 1;
+      $("next").disabled = data.page >= pages;
+      $("resultsCard").style.display = "block";
+    }
+
+    async function run(page = 1) {
+      const slug = $("slug").value.trim();
+      if (!slug) { setStatus("Enter a contest slug.", true); return; }
+      state.slug = slug; state.page = page;
+      $("go").disabled = true;
+      try {
+        setStatus("Requesting prediction…");
+        const data = await loadPage(slug, page);
+        render(data);
+        setStatus(`Done — status: ${data.status}.`);
+      } catch (e) {
+        setStatus(e.message, true);
+      } finally {
+        $("go").disabled = false;
+      }
+    }
+
+    $("go").onclick = () => run(1);
+    $("slug").addEventListener("keydown", (e) => { if (e.key === "Enter") run(1); });
+    $("prev").onclick = () => run(state.page - 1);
+    $("next").onclick = () => run(state.page + 1);
+  </script>
+</body>
+</html>

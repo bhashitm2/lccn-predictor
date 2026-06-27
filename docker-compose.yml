@@ -1,0 +1,43 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      # Inside the compose network, reach mongo by service name.
+      LCCN_MONGODB_URI: "mongodb://mongo:27017"
+      LCCN_DB_NAME: "lccn_predictor"
+      LCCN_CORS_ORIGINS: "*"
+      # Local stack: let /predict trigger crawls on demand (no API key needed).
+      # For a public deploy set LCCN_API_KEY and LCCN_PUBLIC_CRAWL_ENABLED=false.
+      LCCN_PUBLIC_CRAWL_ENABLED: "true"
+      LCCN_API_KEY: ""
+      LCCN_RATE_LIMIT_PER_MINUTE: "120"
+      # Crawler tuning. Rating lookups are batched (LCCN_RATING_BATCH_SIZE users
+      # per GraphQL request), so a full contest resolves in ~2 min instead of ~30.
+      LCCN_RANKING_CONCURRENCY: "8"
+      LCCN_RATING_CONCURRENCY: "8"
+      LCCN_RATING_BATCH_SIZE: "40"
+      # Background jobs off by default locally.
+      LCCN_SCHEDULER_ENABLED: "false"
+      LCCN_AUTO_PREDICT_ENABLED: "false"
+    ports:
+      - "8000:8000"
+
+volumes:
+  mongo_data:

@@ -1,0 +1,38 @@
+# Render Blueprint — free-tier deployment of the predictor API.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Steps:
+#   1. Create a free MongoDB Atlas cluster (M0) and copy its connection string.
+#   2. Push this repo to GitHub, then in Render: New > Blueprint > pick the repo.
+#   3. Set the env vars marked `sync: false` in the Render dashboard
+#      (LCCN_MONGODB_URI, LCCN_API_KEY, LCCN_CORS_ORIGINS).
+#   4. After deploy, set the GitHub Actions secrets so the cron can trigger
+#      predictions (see .github/workflows/predict-cron.yml).
+#
+# NOTE: Render's free web service spins down after ~15 min idle. That's fine —
+# the GitHub Actions cron wakes it twice a week to predict the latest contest,
+# and your website's reads wake it on demand. The in-process auto-predict
+# scheduler is therefore left OFF here (LCCN_AUTO_PREDICT_ENABLED=false).
+services:
+  - type: web
+    name: lccn-predictor
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: LCCN_MONGODB_URI        # MongoDB Atlas connection string
+        sync: false
+      - key: LCCN_DB_NAME
+        value: lccn_predictor
+      - key: LCCN_API_KEY            # secret that gates crawl-triggering endpoints
+        sync: false
+      - key: LCCN_CORS_ORIGINS       # e.g. https://your-website.com
+        sync: false
+      - key: LCCN_PUBLIC_CRAWL_ENABLED
+        value: "false"               # public reads serve cached only
+      - key: LCCN_RATE_LIMIT_PER_MINUTE
+        value: "120"
+      - key: LCCN_SCHEDULER_ENABLED
+        value: "false"
+      - key: LCCN_AUTO_PREDICT_ENABLED
+        value: "false"               # free tier sleeps -> use the GH Actions cron
