@@ -16,6 +16,11 @@ on:
     - cron: "0 5 * * 0"     # retry / late ratings
     - cron: "30 16 * * 6"   # Saturday after biweekly
     - cron: "0 17 * * 6"    # retry
+    # --- re-crawl AFTER LeetCode's cheater purge (these force a re-predict) ---
+    - cron: "0 10 * * 0"    # weekly:   +6h
+    - cron: "0 4 * * 1"     # weekly:   ~+24h (final, after ratings settle)
+    - cron: "0 22 * * 6"    # biweekly: +6h
+    - cron: "0 16 * * 0"    # biweekly: ~+24h (final)
   workflow_dispatch:
     inputs:
       slug:
@@ -56,7 +61,12 @@ jobs:
           SLUG: ${{ github.event.inputs.slug }}
           LIMIT: ${{ github.event.inputs.limit }}
           FORCE: ${{ github.event.inputs.force }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
+          # late scheduled re-crawls force a re-predict (contest is already "done")
+          case "$SCHEDULE" in
+            "0 10 * * 0"|"0 4 * * 1"|"0 22 * * 6"|"0 16 * * 0") FORCE="true" ;;
+          esac
           ARGS=""
           [ -n "$LIMIT" ] && ARGS="$ARGS --limit $LIMIT"
           [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
