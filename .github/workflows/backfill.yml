@@ -1,0 +1,53 @@
+name: Backfill past contests
+
+# One-off historical populate: predicts the N most recently finished contests and
+# writes them to Atlas. Run manually from the Actions tab.
+#
+# NOTE: for contests LeetCode has already officially rated, the computed deltas are
+# illustrative (derived from current/post-contest ratings), not true forecasts.
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "How many recent contests to backfill"
+        required: false
+        default: "10"
+      limit:
+        description: "Top-N per contest (blank = full field)"
+        required: false
+      force:
+        description: "Re-predict even if already done (true/false)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: crawl-predict      # share the lock with crawl-cron so they never overlap
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+      - name: Backfill
+        env:
+          LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
+          LCCN_DB_NAME: lccn_predictor
+          # Gentler crawl to avoid Cloudflare throttling on full contests.
+          LCCN_RANKING_CONCURRENCY: "4"
+          LCCN_RATING_CONCURRENCY: "8"
+          LCCN_HTTP_RETRY: "15"
+          COUNT: ${{ github.event.inputs.count }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          ARGS="--count ${COUNT:-10}"
+          [ -n "$LIMIT" ] && ARGS="$ARGS --limit $LIMIT"
+          [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
+          python -m predictor.cli backfill $ARGS
