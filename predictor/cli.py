@@ -44,6 +44,23 @@ async def _run(slug: str | None, force: bool, limit: int | None) -> int:
             if not slug:
                 logger.error("could not resolve the latest contest slug")
                 return 2
+            if await _predict_one(slug, force, limit):
+                return 0
+
+            logger.warning(
+                f"prediction failed for latest contest {slug}; "
+                "trying a recent fallback contest slug"
+            )
+            contests = await fetch_past_contests(1)
+            for _, fallback_slug, _ in contests:
+                if fallback_slug == slug:
+                    continue
+                logger.info(f"trying fallback contest slug: {fallback_slug}")
+                if await _predict_one(fallback_slug, False, limit):
+                    logger.success(f"fallback succeeded with contest {fallback_slug}")
+                    return 0
+            return 1
+
         return 0 if await _predict_one(slug, force, limit) else 1
     finally:
         await close_db()
