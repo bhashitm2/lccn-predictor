@@ -160,35 +160,31 @@ class CircuitBreaker:
 # crawl, so every batch started cold. One session per process keeps them.
 # --------------------------------------------------------------------------- #
 _session: Optional[AsyncSession] = None
-_session_lock: Optional[asyncio.Lock] = None
-
-
-def _get_session_lock() -> asyncio.Lock:
-    global _session_lock
-    if _session_lock is None:
-        _session_lock = asyncio.Lock()
-    return _session_lock
 
 
 async def get_session() -> AsyncSession:
-    """Return the process-wide session, creating it on first use."""
+    """Return the process-wide session, creating it on first use.
+
+    No lock: there is no await between the check and the assignment, so this is
+    already atomic on an event loop. A module-level ``asyncio.Lock`` would also
+    bind itself to whichever loop touched it first and then raise if the process
+    ever ran a second loop.
+    """
     global _session
-    async with _get_session_lock():
-        if _session is None:
-            _session = AsyncSession(impersonate=get_settings().impersonate)
-        return _session
+    if _session is None:
+        _session = AsyncSession(impersonate=get_settings().impersonate)
+    return _session
 
 
 async def close_http_session() -> None:
     """Close the shared session. Call once at process shutdown."""
     global _session
-    async with _get_session_lock():
-        if _session is not None:
-            try:
-                await _session.close()
-            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
-                logger.debug(f"error closing http session: {exc!r}")
-            _session = None
+    session, _session = _session, None
+    if session is not None:
+        try:
+            await session.close()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            logger.debug(f"error closing http session: {exc!r}")
 
 
 def _retry_after_seconds(resp: Response) -> Optional[float]:
