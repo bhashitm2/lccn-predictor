@@ -16,6 +16,13 @@ concurrency:
 
 jobs:
   test:
+    # DELIBERATELY HARDCODED — do not change to ${{ vars.CRAWLER_RUNNER }}.
+    #
+    # This repo is PUBLIC and this workflow runs on `pull_request`, so a fork PR
+    # can trigger it. Pointing it at a self-hosted runner would let anyone
+    # execute arbitrary code on that machine by opening a PR. The crawl
+    # workflows can take a self-hosted runner precisely because `schedule` and
+    # `workflow_dispatch` are not fork-triggerable; this one is.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

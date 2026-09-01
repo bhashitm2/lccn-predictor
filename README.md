@@ -131,9 +131,17 @@ GitHub Actions (crawl) ──▶ MongoDB Atlas ──▶ web host (serve) ──
 ```
 
 **Why split crawl and serve?** LeetCode's Cloudflare blocks the contest ranking API
-from many cloud-host IPs (Render etc. get 403). A **GitHub Actions runner's IP can
-reach it** via curl_cffi, so the crawl runs there and writes to Atlas; the web host
-only serves cached results. Fully free, fully automated, no proxy, no always-on PC.
+from many cloud-host IPs (Render etc. get 403 consistently). A **GitHub Actions
+runner's IP usually gets through** via curl_cffi, so the crawl runs there and writes
+to Atlas; the web host only serves cached results. Fully free, fully automated, no
+proxy, no always-on PC.
+
+*Usually*, not always: runner IPs come from Azure ranges shared with every CI user
+on the internet, and observed success has been roughly 50/50 — a refused run is
+refused on its very first request, before any pacing helps. The crawler handles that
+safely (it refuses rather than persisting a partial crawl), and a re-run often lands
+on a better IP. If it becomes a persistent problem, move the crawl to a dedicated IP:
+[docs/self-hosted-runner.md](docs/self-hosted-runner.md).
 
 1. **Database — MongoDB Atlas (free M0).** Create a cluster; under **Network Access**
    allow `0.0.0.0/0` (so both the web host and Actions can connect); copy the
@@ -164,6 +172,14 @@ only serves cached results. Fully free, fully automated, no proxy, no always-on 
    > (`LCCN_MIN_RANKING_COVERAGE`): predicting from a truncated field produces
    > wrong Elo numbers *and* overwrites the previous good prediction.
 
+   > **If crawls keep getting 403'd**, the problem is the runner's IP, not the
+   > pacing — GitHub-hosted runners share Azure ranges that Cloudflare scores
+   > poorly, and a refused run is refused on its very first request. Set the
+   > `CRAWLER_RUNNER` repo variable to move the crawl onto a dedicated IP:
+   > see [docs/self-hosted-runner.md](docs/self-hosted-runner.md) (~$4–6/month).
+   > `ci.yml` must stay on GitHub-hosted runners — this repo is public, and that
+   > workflow is fork-triggerable.
+
 That's it — your website calls `GET /api/v1/contest/{slug}/predict` and gets cached
 predictions; the Actions cron keeps them fresh twice a week.
 
@@ -174,6 +190,10 @@ predictions; the Actions cron keeps them fresh twice a week.
 `LCCN_AUTO_PREDICT_ENABLED=true` to use the built-in scheduler instead of (or
 alongside) the GitHub cron, and optionally `LCCN_SCHEDULER_ENABLED=true` to keep the
 rating cache warm. Put a load balancer in front and run 2–3 replicas for read traffic.
+
+If what you actually want is a **reliable crawl** rather than always-on serving,
+the cheaper and more targeted move is a dedicated crawler IP — the API can stay
+on the free tier. See [docs/self-hosted-runner.md](docs/self-hosted-runner.md).
 
 ### Will it scale?
 
