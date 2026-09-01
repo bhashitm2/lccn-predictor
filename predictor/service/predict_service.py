@@ -132,6 +132,10 @@ async def run_prediction(
         contest.limit = limit
         contest.crawled_ranking = 0
         contest.resolved_ratings = 0
+        # Cleared too, so a failed attempt can't leave the previous run's count
+        # standing. On failure the rollback below restores it when there is a
+        # good prediction worth protecting; otherwise 0 is the honest answer.
+        contest.total_records = 0
         contest.updated_at = utcnow()
         await contest.save()
 

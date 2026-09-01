@@ -263,3 +263,19 @@ async def test_limit_narrows_the_expected_field(stub_settings, stub_session):
     rows = await fetch_ranking("weekly-contest-517", user_num=10000, limit=100)
 
     assert len(rows) == 100
+
+
+async def test_stub_settings_shrink_every_cooldown(stub_settings):
+    """Guard: a newly added cooldown must be shrunk for tests.
+
+    Adding `repair_pass_cooldown_seconds` (default 600s) without a fast
+    override here made the suite sleep instead of fail. This enumerates the
+    fields dynamically so the next one can't do the same.
+    """
+    settings = stub_settings()
+    slow = {
+        name: getattr(settings, name)
+        for name in type(settings).model_fields
+        if name.endswith("_cooldown_seconds") and getattr(settings, name) > 1.0
+    }
+    assert not slow, f"test settings still have real-length waits: {slow}"
