@@ -1,0 +1,32 @@
+name: CI
+
+# Nothing ran the test suite on push or PR before this: the other two workflows
+# are schedule/dispatch-only crawlers. A `main` that crashed partway through a
+# prediction therefore merged clean and was only caught by a 15-minute
+# production crawl. This runs the tests where they can block that instead.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+      - name: Run tests
+        # The suite is fully offline (the crawler runs against a stub session),
+        # so it never touches LeetCode or MongoDB Atlas.
+        run: pytest -q

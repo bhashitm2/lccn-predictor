@@ -345,3 +345,22 @@ async def test_cli_reports_failure_when_forced_recrawl_is_blocked(
 
     # A later no-op run on the still-good data reports success again.
     assert await cli._predict_one(slug, force=False, limit=None) == cli.EXIT_OK
+
+
+async def test_total_records_reflects_what_was_persisted(db, mock_crawler, monkeypatch):
+    """`total_records` must not claim work that never reached the database."""
+    slug = "weekly-contest-517"
+
+    # A run that dies after the crawl but before persistence must not leave a
+    # record count behind — this is what left the doc claiming 39,401 records
+    # while only 350 existed.
+    async def boom(_rows):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "_resolve_ratings", boom)
+    contest = await predict_service.run_prediction(slug)
+
+    assert contest.status == "error"
+    assert contest.crawled_ranking == mock_crawler["n"], "rows were crawled"
+    assert contest.total_records == 0, "but none were persisted"
+    assert await ContestRecord.find(ContestRecord.contest_slug == slug).count() == 0

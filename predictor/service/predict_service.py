@@ -153,8 +153,10 @@ async def run_prediction(
         rows = await fetch_ranking(slug, user_num, limit=limit)
         if not rows:
             raise RuntimeError(f"no ranking rows fetched for '{slug}'")
+        # `total_records` is deliberately NOT set here: it means "records
+        # persisted", and nothing has been persisted yet. Setting it up front
+        # left a failed run claiming 39,401 records while the DB held 350.
         contest.crawled_ranking = len(rows)
-        contest.total_records = len(rows)
         await contest.save()
 
         # 3. resolve ratings (cache + batched GraphQL) -----------------------
@@ -176,12 +178,17 @@ async def run_prediction(
         )
 
         # 5. persist ---------------------------------------------------------
-        await _persist_records(slug, rows, old_ratings, attended, deltas, new_ratings)
+        # Count what was actually written: _persist_records dedupes by
+        # user_slug, so it can be fewer than len(rows).
+        written = await _persist_records(
+            slug, rows, old_ratings, attended, deltas, new_ratings
+        )
+        contest.total_records = written
         contest.status = "done"
         contest.predicted_at = utcnow()
         contest.updated_at = utcnow()
         await contest.save()
-        logger.success(f"prediction done for {slug}: {len(rows)} records")
+        logger.success(f"prediction done for {slug}: {written} records")
         return contest
 
     except Exception as exc:  # noqa: BLE001 - record any failure for the API
@@ -294,7 +301,8 @@ async def _persist_records(
     attended,
     deltas,
     new_ratings,
-) -> None:
+) -> int:
+    """Replace this contest's records. Returns the number of docs written."""
     # Build the full replacement set BEFORE deleting anything: the delete is
     # destructive and the previous prediction is the only copy we have.
     # Dedupe by user_slug (the unique handle) keeping the best rank, in case the
@@ -328,3 +336,4 @@ async def _persist_records(
     await ContestRecord.find(ContestRecord.contest_slug == slug).delete()
     for chunk in _chunks(docs, 1000):
         await ContestRecord.insert_many(chunk)
+    return len(docs)

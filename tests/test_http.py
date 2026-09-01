@@ -13,9 +13,7 @@ import time
 
 import pytest
 
-from predictor.config import Settings
-from predictor.crawler import http as http_mod
-from predictor.crawler import ranking as ranking_mod
+from tests.conftest import StubResponse
 from predictor.crawler.http import (
     CircuitBreaker,
     CrawlBlockedError,
@@ -25,71 +23,6 @@ from predictor.crawler.http import (
 from predictor.crawler.ranking import IncompleteCrawlError, fetch_ranking
 
 pytestmark = pytest.mark.asyncio
-
-
-class StubResponse:
-    def __init__(self, status_code: int, payload=None, headers=None):
-        self.status_code = status_code
-        self._payload = payload if payload is not None else {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._payload
-
-
-class StubSession:
-    """Records every request and replies from a caller-supplied handler."""
-
-    def __init__(self, handler):
-        self.handler = handler
-        self.calls: list[str] = []
-
-    async def request(self, method, url, **kwargs):
-        self.calls.append(url)
-        return self.handler(url, len(self.calls))
-
-    async def close(self):
-        return None
-
-
-@pytest.fixture
-def stub_settings(monkeypatch):
-    """Fast, deterministic settings so tests don't sit in real cooldowns."""
-
-    def _apply(**overrides):
-        defaults = dict(
-            http_retry=3,
-            http_rate_limit_per_second=1000.0,
-            http_backoff_base_seconds=0.001,
-            http_backoff_cap_seconds=0.002,
-            http_block_threshold=5,
-            http_block_cooldown_seconds=0.01,
-            http_max_cooldowns=2,
-            repair_passes=1,
-            ranking_concurrency=4,
-            min_ranking_coverage=0.98,
-        )
-        defaults.update(overrides)
-        settings = Settings(**defaults)
-        monkeypatch.setattr(http_mod, "get_settings", lambda: settings)
-        monkeypatch.setattr(ranking_mod, "get_settings", lambda: settings)
-        return settings
-
-    return _apply
-
-
-@pytest.fixture
-def stub_session(monkeypatch):
-    def _install(handler):
-        session = StubSession(handler)
-
-        async def _get_session():
-            return session
-
-        monkeypatch.setattr(http_mod, "get_session", _get_session)
-        return session
-
-    return _install
 
 
 # --------------------------------------------------------------------------- #

@@ -96,10 +96,12 @@ async def fetch_ratings(
     newcomers = 0
     failed_batches = 0
     for bid, members in batch_members.items():
-        result = responses.get(bid)
+        # NB: not `result` — that is the accumulator above, and shadowing it
+        # here turns the assignments below into writes against a FetchResult.
+        batch = responses.get(bid)
         data = {}
-        if result:
-            data = (result.json().get("data") or {})
+        if batch:
+            data = (batch.json().get("data") or {})
         else:
             failed_batches += 1
         for i, key in enumerate(members):
