@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple
 from loguru import logger
 
 from predictor.config import get_settings
-from predictor.crawler.http import fetch_all
+from predictor.crawler.http import CrawlBlockedError, fetch_all
 
 # New-user defaults (see lccn_predictor app/constants.py)
 DEFAULT_RATING = 1500.0
@@ -96,10 +96,10 @@ async def fetch_ratings(
     newcomers = 0
     failed_batches = 0
     for bid, members in batch_members.items():
-        resp = responses.get(bid)
+        result = responses.get(bid)
         data = {}
-        if resp is not None:
-            data = (resp.json().get("data") or {})
+        if result:
+            data = (result.json().get("data") or {})
         else:
             failed_batches += 1
         for i, key in enumerate(members):
@@ -112,6 +112,15 @@ async def fetch_ratings(
             else:
                 result[key] = (DEFAULT_RATING, DEFAULT_ATTENDED_COUNT)
                 newcomers += 1
+    # Defaulting a handful of unresolved users to (1500, 0) is fine; defaulting
+    # a large slice of the field is not — it silently feeds the Elo engine
+    # fabricated inputs. Refuse rather than persist a bogus prediction.
+    if requests and failed_batches / len(requests) > settings.max_failed_rating_batches:
+        raise CrawlBlockedError(
+            f"{failed_batches}/{len(requests)} rating batches failed — "
+            "too many users would fall back to default ratings to trust the "
+            "prediction"
+        )
     logger.info(
         f"resolved {len(result)} ratings "
         f"({newcomers} newcomer/default, {failed_batches} failed batches)"

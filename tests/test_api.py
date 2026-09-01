@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 import pytest
 
 from predictor.api import routes
-from predictor.crawler.ranking import RankingRow
+from predictor.crawler.http import CrawlBlockedError
+from predictor.crawler.ranking import IncompleteCrawlError, RankingRow
 from predictor.db.models import Contest, ContestRecord
 from predictor.service import predict_service
 
@@ -129,6 +130,77 @@ async def test_error_status_on_missing_contest(db, monkeypatch):
     assert contest.error
 
 
+async def test_failed_forced_recrawl_keeps_previous_prediction(
+    db, mock_crawler, monkeypatch
+):
+    """A blocked re-crawl must not take a good prediction offline.
+
+    The API serves 404 for anything not `done`, so flipping status to "error"
+    on a failed refresh loses a perfectly good prediction until some later run
+    happens to succeed.
+    """
+    slug = "weekly-contest-517"
+    contest = await predict_service.run_prediction(slug)
+    assert contest.status == "done"
+    assert contest.total_records == mock_crawler["n"]
+
+    async def blocked(_slug):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", blocked)
+    contest = await predict_service.run_prediction(slug, force=True)
+
+    assert contest.status == "done", "previous prediction must stay served"
+    assert contest.total_records == mock_crawler["n"]
+    assert contest.error and "CrawlBlockedError" in contest.error
+
+    # ...and the records themselves are untouched.
+    count = await ContestRecord.find(ContestRecord.contest_slug == slug).count()
+    assert count == mock_crawler["n"]
+
+    # The route still serves the cached prediction.
+    class FakeResp:
+        status_code = 200
+
+    page = await routes.predict_contest(
+        slug, FakeResp(), page=1, size=10, sort="rank", limit=None
+    )
+    assert page.status == "done" and page.total == mock_crawler["n"]
+
+
+async def test_failed_first_crawl_still_marks_error(db, monkeypatch):
+    """With no prior prediction to protect, a failure is a plain error."""
+
+    async def blocked(_slug):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", blocked)
+    contest = await predict_service.run_prediction("weekly-contest-999", force=True)
+
+    assert contest.status == "error"
+    assert "CrawlBlockedError" in contest.error
+
+
+async def test_partial_crawl_does_not_replace_good_records(
+    db, mock_crawler, monkeypatch
+):
+    """The corrupting scenario: a truncated field must never be persisted."""
+    slug = "weekly-contest-517"
+    await predict_service.run_prediction(slug)
+
+    async def truncated(_slug, user_num, *, limit=None, progress_cb=None):
+        raise IncompleteCrawlError(
+            f"only 350/{user_num} ranking rows for '{_slug}'"
+        )
+
+    monkeypatch.setattr(predict_service, "fetch_ranking", truncated)
+    contest = await predict_service.run_prediction(slug, force=True)
+
+    assert contest.status == "done"
+    count = await ContestRecord.find(ContestRecord.contest_slug == slug).count()
+    assert count == mock_crawler["n"], "good records must survive a partial crawl"
+
+
 # --------------------------------------------------------------------------- #
 # Hardening: auth, serve-only, rate limit, predict-latest
 # --------------------------------------------------------------------------- #
@@ -218,3 +290,58 @@ async def test_predict_latest_triggers(db, monkeypatch):
     slug = await predict_service.predict_latest()
     assert slug == "weekly-contest-test"
     assert called["slug"] == "weekly-contest-test"
+
+
+# --------------------------------------------------------------------------- #
+# CLI exit codes — the workflow's retry loop keys off these.
+# --------------------------------------------------------------------------- #
+
+
+async def test_cli_exit_code_blocked_is_retryable(db, monkeypatch):
+    """Exit 75 (EX_TEMPFAIL) tells the workflow to try again rather than fail."""
+    from predictor import cli
+
+    async def blocked(_slug):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", blocked)
+    code = await cli._predict_one("weekly-contest-517", force=False, limit=None)
+    assert code == cli.EXIT_BLOCKED
+
+
+async def test_cli_exit_code_missing_contest_is_hard_failure(db, monkeypatch):
+    """A genuinely absent contest must not be retried as if it were a block."""
+    from predictor import cli
+
+    async def no_users(_slug):
+        return None
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", no_users)
+    code = await cli._predict_one("nope-contest", force=False, limit=None)
+    assert code == cli.EXIT_FAILED
+
+
+async def test_cli_exit_code_ok(db, mock_crawler):
+    from predictor import cli
+
+    code = await cli._predict_one("weekly-contest-517", force=False, limit=None)
+    assert code == cli.EXIT_OK
+
+
+async def test_cli_reports_failure_when_forced_recrawl_is_blocked(
+    db, mock_crawler, monkeypatch
+):
+    """Data stays live, but the run still reports that the refresh failed."""
+    from predictor import cli
+
+    slug = "weekly-contest-517"
+    assert await cli._predict_one(slug, force=False, limit=None) == cli.EXIT_OK
+
+    async def blocked(_slug):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", blocked)
+    assert await cli._predict_one(slug, force=True, limit=None) == cli.EXIT_BLOCKED
+
+    # A later no-op run on the still-good data reports success again.
+    assert await cli._predict_one(slug, force=False, limit=None) == cli.EXIT_OK

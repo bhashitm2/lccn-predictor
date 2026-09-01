@@ -10,17 +10,18 @@ name: Crawl & predict latest contest
 #
 # Times are UTC. LeetCode weekly ends ~04:00 UTC Sun; biweekly ~16:00 UTC Sat.
 # Re-runs are no-ops once the latest contest is already predicted.
+#
+# Four schedules: one crawl right after each contest type ends, and one forced
+# re-crawl ~24h later once LeetCode's cheater purge and rating updates have
+# settled. Transient Cloudflare blocks are handled by the in-step retry loop
+# below rather than by extra cron entries — every extra full crawl is another
+# ~1,600 requests from this IP, which is what earns the block in the first place.
 on:
   schedule:
-    - cron: "30 4 * * 0"    # Sunday after weekly
-    - cron: "0 5 * * 0"     # retry / late ratings
-    - cron: "30 16 * * 6"   # Saturday after biweekly
-    - cron: "0 17 * * 6"    # retry
-    # --- re-crawl AFTER LeetCode's cheater purge (these force a re-predict) ---
-    - cron: "0 10 * * 0"    # weekly:   +6h
-    - cron: "0 4 * * 1"     # weekly:   ~+24h (final, after ratings settle)
-    - cron: "0 22 * * 6"    # biweekly: +6h
-    - cron: "0 16 * * 0"    # biweekly: ~+24h (final)
+    - cron: "30 4 * * 0"    # weekly:   ~30m after it ends
+    - cron: "0 4 * * 1"     # weekly:   ~+24h, forced re-crawl (post-purge, final)
+    - cron: "30 16 * * 6"   # biweekly: ~30m after it ends
+    - cron: "0 16 * * 0"    # biweekly: ~+24h, forced re-crawl (post-purge, final)
   workflow_dispatch:
     inputs:
       slug:
@@ -41,9 +42,12 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    # A full contest is ~1,600 ranking pages fetched at a deliberately polite
+    # rate, plus up to two repair passes with cooldowns between them.
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install dependencies
@@ -52,12 +56,19 @@ jobs:
         env:
           LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
           LCCN_DB_NAME: lccn_predictor
-          # Gentler ranking crawl: a full ~1,500-page contest at high concurrency
-          # gets throttled (403'd) by Cloudflare on the runner's IP, dropping pages.
-          # Lower concurrency + more retries trades speed for completeness.
+          # Politeness settings. Concurrency alone does NOT bound the request
+          # rate: once Cloudflare starts refusing, a 403 comes back from the
+          # edge in ~20ms, so 8 concurrent slots became hundreds of requests a
+          # second and ~25,000 requests per run. The rate limit is the real
+          # control; the circuit breaker stops us hammering a closed door.
           LCCN_RANKING_CONCURRENCY: "4"
-          LCCN_RATING_CONCURRENCY: "8"
-          LCCN_HTTP_RETRY: "15"
+          LCCN_RATING_CONCURRENCY: "6"
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "5"
+          LCCN_HTTP_RETRY: "5"
+          LCCN_HTTP_BLOCK_THRESHOLD: "12"
+          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "90"
+          LCCN_HTTP_MAX_COOLDOWNS: "3"
+          LCCN_REPAIR_PASSES: "2"
           SLUG: ${{ github.event.inputs.slug }}
           LIMIT: ${{ github.event.inputs.limit }}
           FORCE: ${{ github.event.inputs.force }}
@@ -65,13 +76,37 @@ jobs:
         run: |
           # late scheduled re-crawls force a re-predict (contest is already "done")
           case "$SCHEDULE" in
-            "0 10 * * 0"|"0 4 * * 1"|"0 22 * * 6"|"0 16 * * 0") FORCE="true" ;;
+            "0 4 * * 1"|"0 16 * * 0") FORCE="true" ;;
           esac
           ARGS=""
           [ -n "$LIMIT" ] && ARGS="$ARGS --limit $LIMIT"
           [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
           if [ -n "$SLUG" ]; then
-            python -m predictor.cli predict "$SLUG" $ARGS
+            set -- predict "$SLUG" $ARGS
           else
-            python -m predictor.cli predict-latest $ARGS
+            set -- predict-latest $ARGS
           fi
+
+          # Retry a transient block in-process rather than waiting for another
+          # cron. Exit 75 (EX_TEMPFAIL) means "we were refused" — worth another
+          # try after a pause. Any other non-zero is a real failure: stop.
+          attempts=3
+          for i in $(seq 1 $attempts); do
+            echo "::group::attempt $i/$attempts"
+            set +e
+            python -m predictor.cli "$@"
+            code=$?
+            set -e
+            echo "::endgroup::"
+            if [ $code -eq 0 ]; then
+              exit 0
+            fi
+            if [ $code -ne 75 ]; then
+              echo "::error::crawl failed with exit code $code (not a transient block)"
+              exit $code
+            fi
+            echo "::warning::attempt $i was blocked by LeetCode/Cloudflare (exit 75)"
+            [ "$i" -lt "$attempts" ] && sleep 480
+          done
+          echo "::error::still blocked after $attempts attempts; existing predictions were left untouched"
+          exit 75

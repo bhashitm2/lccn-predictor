@@ -151,6 +151,19 @@ only serves cached results. Fully free, fully automated, no proxy, no always-on 
    Atlas. Add **one** repo secret: `LCCN_MONGODB_URI` (same Atlas string). Trigger a
    first run manually from the **Actions** tab (optionally with a `slug` / `limit`).
 
+   Four schedules: one crawl shortly after each contest type ends, plus a forced
+   re-crawl ~24 h later once LeetCode's cheater purge and rating updates settle.
+
+   > **Crawl politely.** A full contest is ~1,600 ranking pages. LeetCode sits
+   > behind Cloudflare, and the request *rate* — not the concurrency — is what
+   > gets an IP refused: a 403 returns from the edge in ~20 ms, so a handful of
+   > concurrent slots plus retries can become hundreds of requests a second.
+   > `LCCN_HTTP_RATE_LIMIT_PER_SECOND` bounds the whole batch, and a circuit
+   > breaker pauses everything after a run of 403s instead of hammering on.
+   > If a crawl comes back short, it is **refused, not persisted**
+   > (`LCCN_MIN_RANKING_COVERAGE`): predicting from a truncated field produces
+   > wrong Elo numbers *and* overwrites the previous good prediction.
+
 That's it — your website calls `GET /api/v1/contest/{slug}/predict` and gets cached
 predictions; the Actions cron keeps them fresh twice a week.
 
