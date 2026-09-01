@@ -49,19 +49,26 @@ class Settings(BaseSettings):
     # bound this: when Cloudflare 403s from the edge in ~20ms, 8 concurrent
     # slots turn into hundreds of requests a second, which is what gets the
     # runner IP blocked in the first place.
-    http_rate_limit_per_second: float = 6.0
+    http_rate_limit_per_second: float = 4.0
     http_backoff_base_seconds: float = 1.0
     http_backoff_cap_seconds: float = 30.0
     # Consecutive blocked (403/429) responses before the breaker pauses the
     # batch, how long it pauses, and how many fruitless pauses before we give up.
+    # A Cloudflare IP-reputation block does not clear in a minute; short
+    # cooldowns just spend the breaker's budget without waiting anything out.
     http_block_threshold: int = 12
-    http_block_cooldown_seconds: float = 60.0
+    http_block_cooldown_seconds: float = 300.0
     http_max_cooldowns: int = 3
 
     # --- Crawl completeness -------------------------------------------------
     # Extra slow passes over just the pages that failed, before we call the
-    # crawl incomplete.
+    # crawl incomplete. These resume — each pass keeps every page already
+    # fetched — which is why patience belongs here rather than in a workflow
+    # retry that would restart the whole crawl from page 1.
     repair_passes: int = 2
+    # Wait between repair passes. Distinct from the breaker's cooldown: that
+    # one paces requests inside a pass, this one waits out a block between them.
+    repair_pass_cooldown_seconds: float = 600.0
     # Minimum fraction of expected ranking rows required to accept a crawl.
     # Below this the prediction is refused rather than persisted: the Elo/FFT
     # engine needs the whole field, and persisting overwrites the previous

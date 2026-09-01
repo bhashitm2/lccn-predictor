@@ -42,9 +42,12 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    # A full contest is ~1,600 ranking pages fetched at a deliberately polite
-    # rate, plus up to two repair passes with cooldowns between them.
-    timeout-minutes: 90
+    # A full contest is ~1,600 ranking pages at a deliberately polite rate
+    # (~9 min), plus ratings and the Elo compute — a healthy run is ~20 min.
+    # The cap is sized for the unhealthy case: worst-case in-process patience
+    # is ~65 min of breaker cooldowns and repair-pass waits, and being killed
+    # mid-recovery would discard every page already fetched.
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -63,12 +66,13 @@ jobs:
           # control; the circuit breaker stops us hammering a closed door.
           LCCN_RANKING_CONCURRENCY: "4"
           LCCN_RATING_CONCURRENCY: "6"
-          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "5"
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "3"
           LCCN_HTTP_RETRY: "5"
           LCCN_HTTP_BLOCK_THRESHOLD: "12"
-          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "90"
+          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "300"
           LCCN_HTTP_MAX_COOLDOWNS: "3"
           LCCN_REPAIR_PASSES: "2"
+          LCCN_REPAIR_PASS_COOLDOWN_SECONDS: "600"
           SLUG: ${{ github.event.inputs.slug }}
           LIMIT: ${{ github.event.inputs.limit }}
           FORCE: ${{ github.event.inputs.force }}
@@ -87,26 +91,28 @@ jobs:
             set -- predict-latest $ARGS
           fi
 
-          # Retry a transient block in-process rather than waiting for another
-          # cron. Exit 75 (EX_TEMPFAIL) means "we were refused" — worth another
-          # try after a pause. Any other non-zero is a real failure: stop.
-          attempts=3
-          for i in $(seq 1 $attempts); do
-            echo "::group::attempt $i/$attempts"
-            set +e
-            python -m predictor.cli "$@"
-            code=$?
-            set -e
-            echo "::endgroup::"
-            if [ $code -eq 0 ]; then
-              exit 0
-            fi
-            if [ $code -ne 75 ]; then
-              echo "::error::crawl failed with exit code $code (not a transient block)"
-              exit $code
-            fi
-            echo "::warning::attempt $i was blocked by LeetCode/Cloudflare (exit 75)"
-            [ "$i" -lt "$attempts" ] && sleep 480
-          done
-          echo "::error::still blocked after $attempts attempts; existing predictions were left untouched"
-          exit 75
+          # Deliberately ONE attempt. An earlier version retried the whole
+          # command up to 3x, which restarts the crawl at page 1 and throws
+          # away every page already fetched — so a *blocked* run issued three
+          # full ~1,600-page crawls, tripling the load at exactly the moment
+          # LeetCode had told us to back off. Retrying is not free here; it is
+          # what deepens the block.
+          #
+          # Transient failures are handled in-process instead, by the repair
+          # passes in fetch_ranking, which keep every page already in hand.
+          # A block that outlasts those is an IP-reputation problem that no
+          # amount of retrying inside one job will fix — it needs hours, so the
+          # next scheduled run is the right place to pick it up.
+          set +e
+          python -m predictor.cli "$@"
+          code=$?
+          set -e
+          if [ $code -eq 0 ]; then
+            exit 0
+          fi
+          if [ $code -eq 75 ]; then
+            echo "::error::blocked by LeetCode/Cloudflare (exit 75). Existing predictions were left untouched. Do NOT re-run immediately — that deepens the block; wait for the next scheduled crawl."
+          else
+            echo "::error::crawl failed with exit code $code (not a transient block)"
+          fi
+          exit $code

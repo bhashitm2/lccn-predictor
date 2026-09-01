@@ -364,3 +364,32 @@ async def test_total_records_reflects_what_was_persisted(db, mock_crawler, monke
     assert contest.crawled_ranking == mock_crawler["n"], "rows were crawled"
     assert contest.total_records == 0, "but none were persisted"
     assert await ContestRecord.find(ContestRecord.contest_slug == slug).count() == 0
+
+
+async def test_failed_attempt_clears_stale_record_count(db, mock_crawler, monkeypatch):
+    """A failed run must not leave the previous run's count standing.
+
+    Production showed `records=39401` on a run that persisted nothing — the
+    figure was left over from an earlier attempt.
+    """
+    slug = "weekly-contest-517"
+
+    # First attempt succeeds and records a real count...
+    contest = await predict_service.run_prediction(slug)
+    assert contest.total_records == mock_crawler["n"]
+
+    # ...then wipe the records so there is no good prediction to protect,
+    # mimicking a contest whose docs are gone but whose counter is stale.
+    await ContestRecord.find(ContestRecord.contest_slug == slug).delete()
+    doc = await Contest.find_one(Contest.title_slug == slug)
+    doc.status = "error"
+    await doc.save()
+
+    async def blocked(_slug):
+        raise CrawlBlockedError("403 from Cloudflare")
+
+    monkeypatch.setattr(predict_service, "fetch_user_num", blocked)
+    contest = await predict_service.run_prediction(slug, force=True)
+
+    assert contest.status == "error"
+    assert contest.total_records == 0, "stale count must not survive a failure"

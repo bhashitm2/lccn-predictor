@@ -154,9 +154,11 @@ async def fetch_ranking(
         if attempt > 0:
             logger.warning(
                 f"repair pass {attempt}/{settings.repair_passes}: "
-                f"re-fetching {len(pending)} failed page(s) for {slug}"
+                f"re-fetching {len(pending)} failed page(s) for {slug} "
+                f"after a {settings.repair_pass_cooldown_seconds:.0f}s wait "
+                f"({len(by_page)} page(s) already in hand are kept)"
             )
-            await asyncio.sleep(settings.http_block_cooldown_seconds)
+            await asyncio.sleep(settings.repair_pass_cooldown_seconds)
 
         # Halve rate and concurrency on each repair pass — if the first pass was
         # refused, going back at the same speed just gets refused again.

@@ -62,6 +62,9 @@ def stub_settings(monkeypatch):
             http_block_cooldown_seconds=0.01,
             http_max_cooldowns=2,
             repair_passes=1,
+            # Production defaults for these are minutes long — a test that
+            # forgets to shrink them silently sleeps instead of failing.
+            repair_pass_cooldown_seconds=0.01,
             ranking_concurrency=4,
             min_ranking_coverage=0.98,
         )
