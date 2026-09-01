@@ -1,9 +1,15 @@
 name: Crawl & predict latest contest
 
-# The crawler runs HERE (GitHub Actions), not on the web host: a runner's IP can
-# reach LeetCode's Cloudflare-protected ranking API via curl_cffi, whereas many
-# cloud hosts (e.g. Render) get 403'd. It writes predictions straight to MongoDB
-# Atlas; the deployed API then serves those cached results.
+# The crawler runs HERE, not on the web host, because it needs an IP that
+# LeetCode's Cloudflare edge will serve. It writes predictions straight to
+# MongoDB Atlas; the deployed API then serves those cached results.
+#
+# On a GitHub-hosted runner that is a COIN FLIP, not a guarantee. Runners draw
+# from Azure ranges shared with every CI user on the internet, and Cloudflare
+# scores them accordingly: observed runs have been roughly 50/50, and a refused
+# run is refused on the very first request, before any pacing can help. Set the
+# CRAWLER_RUNNER repo variable to move this onto a dedicated IP — see
+# docs/self-hosted-runner.md.
 #
 # Required repository secret:
 #   LCCN_MONGODB_URI   the same MongoDB Atlas connection string the web host uses
@@ -13,9 +19,9 @@ name: Crawl & predict latest contest
 #
 # Four schedules: one crawl right after each contest type ends, and one forced
 # re-crawl ~24h later once LeetCode's cheater purge and rating updates have
-# settled. Transient Cloudflare blocks are handled by the in-step retry loop
-# below rather than by extra cron entries — every extra full crawl is another
-# ~1,600 requests from this IP, which is what earns the block in the first place.
+# settled. Transient failures are handled in-process by fetch_ranking's repair
+# passes, which keep every page already fetched — deliberately NOT by extra cron
+# entries or job-level retries, both of which restart the crawl from page 1.
 on:
   schedule:
     - cron: "30 4 * * 0"    # weekly:   ~30m after it ends
@@ -41,7 +47,16 @@ concurrency:
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
+    # Runner is selectable via the CRAWLER_RUNNER repo variable so the crawl can
+    # move to a dedicated IP without a code change. Unset => empty string =>
+    # falls back to ubuntu-latest, so nothing changes until you set it.
+    #
+    # SAFE HERE, AND ONLY HERE: this workflow is reachable only by `schedule`
+    # and `workflow_dispatch`, neither of which a fork can trigger. This repo is
+    # PUBLIC, so any workflow a fork *can* trigger (i.e. ci.yml, on
+    # pull_request) must never run on a self-hosted runner — a fork PR would
+    # execute arbitrary code on your box. Do not "tidy" this into a shared value.
+    runs-on: ${{ vars.CRAWLER_RUNNER || 'ubuntu-latest' }}
     # A full contest is ~1,600 ranking pages at a deliberately polite rate
     # (~9 min), plus ratings and the Elo compute — a healthy run is ~20 min.
     # The cap is sized for the unhealthy case: worst-case in-process patience
@@ -66,7 +81,11 @@ jobs:
           # control; the circuit breaker stops us hammering a closed door.
           LCCN_RANKING_CONCURRENCY: "4"
           LCCN_RATING_CONCURRENCY: "6"
-          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "3"
+          # 3/s is tuned for a shared, already-suspect GitHub IP. On a
+          # dedicated runner set CRAWLER_RATE_LIMIT to ~8 (a full crawl drops
+          # from ~9 min to ~3.5). Everything below it protects data integrity,
+          # not the IP, and should be left alone.
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: ${{ vars.CRAWLER_RATE_LIMIT || '3' }}
           LCCN_HTTP_RETRY: "5"
           LCCN_HTTP_BLOCK_THRESHOLD: "12"
           LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "300"
