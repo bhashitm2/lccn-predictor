@@ -29,8 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install dependencies
@@ -39,10 +39,14 @@ jobs:
         env:
           LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
           LCCN_DB_NAME: lccn_predictor
-          # Gentler crawl to avoid Cloudflare throttling on full contests.
+          # Gentler crawl to avoid Cloudflare throttling on full contests. The
+          # rate limit — not the concurrency — is what actually bounds our
+          # request rate once the edge starts refusing; see crawl-cron.yml.
           LCCN_RANKING_CONCURRENCY: "4"
-          LCCN_RATING_CONCURRENCY: "8"
-          LCCN_HTTP_RETRY: "15"
+          LCCN_RATING_CONCURRENCY: "6"
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "5"
+          LCCN_HTTP_RETRY: "5"
+          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "90"
           COUNT: ${{ github.event.inputs.count }}
           LIMIT: ${{ github.event.inputs.limit }}
           FORCE: ${{ github.event.inputs.force }}

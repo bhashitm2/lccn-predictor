@@ -110,6 +110,21 @@ async def run_prediction(
     if contest.status == "done" and not force:
         return contest
 
+    # Snapshot what we'd be destroying. A forced re-crawl of an already-predicted
+    # contest must not take that contest offline just because it got blocked:
+    # the API serves 404 for anything not `done`, so flipping status to "error"
+    # loses a perfectly good prediction until some later run happens to succeed.
+    previous = {
+        "status": contest.status,
+        "user_num": contest.user_num,
+        "crawled_ranking": contest.crawled_ranking,
+        "resolved_ratings": contest.resolved_ratings,
+        "total_records": contest.total_records,
+        "limit": contest.limit,
+        "predicted_at": contest.predicted_at,
+    }
+    had_good_prediction = previous["status"] == "done" and previous["total_records"] > 0
+
     try:
         # 1. resolve user_num ------------------------------------------------
         contest.status = "crawling"
@@ -132,6 +147,9 @@ async def run_prediction(
         # 2. crawl ranking ---------------------------------------------------
         # (ranking pages are fetched as one concurrent batch, so we record the
         # final count rather than racing per-page DB writes)
+        # fetch_ranking enforces the coverage threshold itself and raises
+        # IncompleteCrawlError / CrawlBlockedError rather than handing back a
+        # truncated field.
         rows = await fetch_ranking(slug, user_num, limit=limit)
         if not rows:
             raise RuntimeError(f"no ranking rows fetched for '{slug}'")
@@ -168,9 +186,22 @@ async def run_prediction(
 
     except Exception as exc:  # noqa: BLE001 - record any failure for the API
         logger.exception(f"prediction failed for {slug}")
-        contest.status = "error"
-        contest.error = str(exc)
+        # Keep the exception type in the message: "blocked by Cloudflare" and
+        # "no such contest" need very different responses, and the API surfaces
+        # this string verbatim.
+        contest.error = f"{type(exc).__name__}: {exc}"
         contest.updated_at = utcnow()
+        if had_good_prediction:
+            # Roll the doc back to the prediction we already had and keep
+            # serving it. `error` still records why the refresh failed.
+            for field, value in previous.items():
+                setattr(contest, field, value)
+            logger.warning(
+                f"re-crawl of {slug} failed; keeping the previous prediction "
+                f"({previous['total_records']} records) live"
+            )
+        else:
+            contest.status = "error"
         await contest.save()
         return contest
 
@@ -264,8 +295,8 @@ async def _persist_records(
     deltas,
     new_ratings,
 ) -> None:
-    # replace any previous prediction for this slug
-    await ContestRecord.find(ContestRecord.contest_slug == slug).delete()
+    # Build the full replacement set BEFORE deleting anything: the delete is
+    # destructive and the previous prediction is the only copy we have.
     # Dedupe by user_slug (the unique handle) keeping the best rank, in case the
     # live ranking shifted during crawl and a user appeared on two pages.
     seen: set = set()
@@ -289,5 +320,11 @@ async def _persist_records(
                 new_rating=round(float(new_ratings[i]), 2),
             )
         )
+    if not docs:
+        raise RuntimeError(
+            f"refusing to replace records for '{slug}' with an empty set"
+        )
+    # Only now replace the previous prediction for this slug.
+    await ContestRecord.find(ContestRecord.contest_slug == slug).delete()
     for chunk in _chunks(docs, 1000):
         await ContestRecord.insert_many(chunk)
