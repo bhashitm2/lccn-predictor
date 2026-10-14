@@ -1,0 +1,129 @@
+name: Crawl attempt
+
+# One crawl attempt on one runner. Called by crawl-cron.yml, which chains up to
+# four of these: a later attempt runs only if the previous one was refused by
+# Cloudflare (CLI exit 75).
+#
+# Why chain jobs rather than retry inside one: Cloudflare refuses many GitHub
+# runner IPs outright — the very first ranking request gets a 403 before the run
+# has sent any real traffic. Retrying from the same IP is pointless and deepens
+# the block. Each job, though, gets a fresh VM with a different IP, so a new job
+# is a genuinely new chance.
+#
+# Called workflows see the caller's `github` context, so the schedule and the
+# workflow_dispatch inputs below are crawl-cron's.
+#
+# No `concurrency:` here — the caller holds the `crawl-predict` group, and
+# claiming it again from inside the run would deadlock.
+on:
+  workflow_call:
+    inputs:
+      attempt:
+        description: "Attempt number (for the logs)"
+        required: true
+        type: number
+      final:
+        description: "Last attempt: a block fails the run instead of passing it on"
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      outcome:
+        description: "ok | blocked | failed"
+        value: ${{ jobs.crawl.outputs.outcome }}
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    # A full contest is ~1,600 ranking pages at a deliberately polite rate, plus
+    # ratings, the Elo compute and the write to Atlas. A heavily throttled crawl
+    # has needed ~1h50m before the write even started (weekly-contest-521 was
+    # killed at the old 110-minute cap with every page in hand).
+    timeout-minutes: 180
+    outputs:
+      outcome: ${{ steps.crawl.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+      - name: Runner egress IP
+        # Each attempt should show a different IP — that is the whole premise.
+        run: |
+          ip=$(curl -fsS --max-time 10 https://checkip.amazonaws.com || echo unknown)
+          echo "attempt ${{ inputs.attempt }} egress IP: $ip"
+      - name: Crawl + predict
+        id: crawl
+        env:
+          LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
+          LCCN_DB_NAME: lccn_predictor
+          # Politeness settings. Concurrency alone does NOT bound the request
+          # rate: once Cloudflare starts refusing, a 403 comes back from the
+          # edge in ~20ms, so 8 concurrent slots became hundreds of requests a
+          # second and ~25,000 requests per run. The rate limit is the real
+          # control; the circuit breaker stops us hammering a closed door.
+          LCCN_RANKING_CONCURRENCY: "4"
+          LCCN_RATING_CONCURRENCY: "6"
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "3"
+          LCCN_HTTP_RETRY: "5"
+          LCCN_HTTP_BLOCK_THRESHOLD: "12"
+          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "300"
+          LCCN_HTTP_MAX_COOLDOWNS: "3"
+          LCCN_REPAIR_PASSES: "2"
+          LCCN_REPAIR_PASS_COOLDOWN_SECONDS: "600"
+          SLUG: ${{ github.event.inputs.slug }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          FORCE: ${{ github.event.inputs.force }}
+          SCHEDULE: ${{ github.event.schedule }}
+          FINAL: ${{ inputs.final }}
+        run: |
+          # Scheduled slots run predict-recent: predict anything from the last
+          # 72h that isn't done yet, and on the two ~+24h slots also refresh
+          # that contest kind (post-purge). Keep these strings in sync with the
+          # cron entries in crawl-cron.yml.
+          case "$SCHEDULE" in
+            "13 4 * * 1")  set -- predict-recent --refresh weekly ;;
+            "13 16 * * 0") set -- predict-recent --refresh biweekly ;;
+            "")
+              # manual dispatch
+              if [ -n "$SLUG" ]; then
+                set -- predict "$SLUG"
+                [ "$FORCE" = "true" ] && set -- "$@" --force
+              elif [ "$FORCE" = "true" ]; then
+                set -- predict-latest --force
+              else
+                set -- predict-recent
+              fi
+              [ -n "$LIMIT" ] && set -- "$@" --limit "$LIMIT"
+              ;;
+            *) set -- predict-recent ;;
+          esac
+          echo "attempt ${{ inputs.attempt }}: python -m predictor.cli $*"
+
+          # A block inside this job is still handled in-process (breaker
+          # cooldowns, repair passes that keep every page already fetched).
+          # Only once that patience is spent — or the IP was refused from the
+          # first request — do we hand over to a fresh runner.
+          set +e
+          python -m predictor.cli "$@"
+          code=$?
+          set -e
+          if [ $code -eq 0 ]; then
+            echo "outcome=ok" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ $code -eq 75 ]; then
+            echo "outcome=blocked" >> "$GITHUB_OUTPUT"
+            if [ "$FINAL" = "true" ]; then
+              echo "::error::blocked by LeetCode/Cloudflare on every attempt (exit 75). Existing predictions were left untouched; the next scheduled slot will catch up."
+              exit 75
+            fi
+            echo "::warning::attempt ${{ inputs.attempt }} was blocked by LeetCode/Cloudflare (exit 75); retrying on a fresh runner."
+            exit 0
+          fi
+          echo "outcome=failed" >> "$GITHUB_OUTPUT"
+          echo "::error::crawl failed with exit code $code (not a transient block)"
+          exit $code

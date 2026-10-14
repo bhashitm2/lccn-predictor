@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # a few stragglers and fabricated input for a large slice of the field.
     max_failed_rating_batches: float = 0.02
 
+    # --- Scheduled catch-up (cli predict-recent) -----------------------------
+    # Contests that started within this window are eligible: anything not yet
+    # predicted is retried by every scheduled slot. Older ones are left alone —
+    # once LeetCode publishes the new ratings, a late prediction would be built
+    # from post-contest ratings.
+    recent_contest_max_age_hours: float = 72.0
+    # A `--refresh` slot re-predicts a done contest only if that prediction is
+    # at least this old, so a retry on a fresh runner doesn't redo a refresh an
+    # earlier attempt in the same run already completed.
+    refresh_min_age_hours: float = 6.0
+
     # API
     cors_origins: str = "*"
     # If set, crawl-triggering endpoints (admin predict, refresh) require this key
