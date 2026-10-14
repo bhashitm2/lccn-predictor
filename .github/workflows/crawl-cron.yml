@@ -9,29 +9,37 @@ name: Crawl & predict latest contest
 #   LCCN_MONGODB_URI   the same MongoDB Atlas connection string the web host uses
 #
 # Times are UTC. LeetCode weekly ends ~04:00 UTC Sun; biweekly ~16:00 UTC Sat.
-# Re-runs are no-ops once the latest contest is already predicted.
 #
-# Four schedules: one crawl right after each contest type ends, and one forced
-# re-crawl ~24h later once LeetCode's cheater purge and rating updates have
-# settled. Transient Cloudflare blocks are handled by the in-step retry loop
-# below rather than by extra cron entries — every extra full crawl is another
-# ~1,600 requests from this IP, which is what earns the block in the first place.
+# Four schedules: one crawl shortly after each contest type ends, and one
+# re-crawl of that contest type ~24h later once LeetCode's cheater purge has
+# settled. Every slot runs `predict-recent`, which also predicts any contest
+# from the last 72h that is still missing — so a slot that got blocked (or that
+# GitHub delayed or dropped) is picked up by the next one, and once everything
+# is predicted a slot is a cheap no-op.
+#
+# Minutes are deliberately off :00/:30, the times GitHub's docs name as most
+# likely to delay or drop scheduled runs. The two refresh crons are matched by
+# string in crawl-attempt.yml — change them together.
+#
+# Each slot tries up to four runners: if an attempt is refused by Cloudflare
+# (exit 75), the next attempt runs as a new job on a fresh VM with a different
+# IP. See crawl-attempt.yml for why that beats retrying in place.
 on:
   schedule:
-    - cron: "30 4 * * 0"    # weekly:   ~30m after it ends
-    - cron: "0 4 * * 1"     # weekly:   ~+24h, forced re-crawl (post-purge, final)
-    - cron: "30 16 * * 6"   # biweekly: ~30m after it ends
-    - cron: "0 16 * * 0"    # biweekly: ~+24h, forced re-crawl (post-purge, final)
+    - cron: "41 4 * * 0"    # weekly:   ~40m after it ends
+    - cron: "13 4 * * 1"    # weekly:   ~+24h, refresh (post-purge, final)
+    - cron: "41 16 * * 6"   # biweekly: ~40m after it ends
+    - cron: "13 16 * * 0"   # biweekly: ~+24h, refresh (post-purge, final)
   workflow_dispatch:
     inputs:
       slug:
-        description: "Contest slug (blank = latest finished)"
+        description: "Contest slug (blank = every recent contest still missing)"
         required: false
       limit:
         description: "Top-N only (blank = full contest)"
         required: false
       force:
-        description: "Re-predict even if already done (true/false)"
+        description: "Re-predict even if already done (true/false; blank slug = latest)"
         required: false
         default: "false"
 
@@ -40,79 +48,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  crawl:
-    runs-on: ubuntu-latest
-    # A full contest is ~1,600 ranking pages at a deliberately polite rate
-    # (~9 min), plus ratings and the Elo compute — a healthy run is ~20 min.
-    # The cap is sized for the unhealthy case: worst-case in-process patience
-    # is ~65 min of breaker cooldowns and repair-pass waits, and being killed
-    # mid-recovery would discard every page already fetched.
-    timeout-minutes: 110
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-      - name: Install dependencies
-        run: pip install --quiet -r requirements.txt
-      - name: Crawl + predict
-        env:
-          LCCN_MONGODB_URI: ${{ secrets.LCCN_MONGODB_URI }}
-          LCCN_DB_NAME: lccn_predictor
-          # Politeness settings. Concurrency alone does NOT bound the request
-          # rate: once Cloudflare starts refusing, a 403 comes back from the
-          # edge in ~20ms, so 8 concurrent slots became hundreds of requests a
-          # second and ~25,000 requests per run. The rate limit is the real
-          # control; the circuit breaker stops us hammering a closed door.
-          LCCN_RANKING_CONCURRENCY: "4"
-          LCCN_RATING_CONCURRENCY: "6"
-          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "3"
-          LCCN_HTTP_RETRY: "5"
-          LCCN_HTTP_BLOCK_THRESHOLD: "12"
-          LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "300"
-          LCCN_HTTP_MAX_COOLDOWNS: "3"
-          LCCN_REPAIR_PASSES: "2"
-          LCCN_REPAIR_PASS_COOLDOWN_SECONDS: "600"
-          SLUG: ${{ github.event.inputs.slug }}
-          LIMIT: ${{ github.event.inputs.limit }}
-          FORCE: ${{ github.event.inputs.force }}
-          SCHEDULE: ${{ github.event.schedule }}
-        run: |
-          # late scheduled re-crawls force a re-predict (contest is already "done")
-          case "$SCHEDULE" in
-            "0 4 * * 1"|"0 16 * * 0") FORCE="true" ;;
-          esac
-          ARGS=""
-          [ -n "$LIMIT" ] && ARGS="$ARGS --limit $LIMIT"
-          [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
-          if [ -n "$SLUG" ]; then
-            set -- predict "$SLUG" $ARGS
-          else
-            set -- predict-latest $ARGS
-          fi
+  attempt-1:
+    name: Attempt 1
+    uses: ./.github/workflows/crawl-attempt.yml
+    with:
+      attempt: 1
+    secrets: inherit
 
-          # Deliberately ONE attempt. An earlier version retried the whole
-          # command up to 3x, which restarts the crawl at page 1 and throws
-          # away every page already fetched — so a *blocked* run issued three
-          # full ~1,600-page crawls, tripling the load at exactly the moment
-          # LeetCode had told us to back off. Retrying is not free here; it is
-          # what deepens the block.
-          #
-          # Transient failures are handled in-process instead, by the repair
-          # passes in fetch_ranking, which keep every page already in hand.
-          # A block that outlasts those is an IP-reputation problem that no
-          # amount of retrying inside one job will fix — it needs hours, so the
-          # next scheduled run is the right place to pick it up.
-          set +e
-          python -m predictor.cli "$@"
-          code=$?
-          set -e
-          if [ $code -eq 0 ]; then
-            exit 0
-          fi
-          if [ $code -eq 75 ]; then
-            echo "::error::blocked by LeetCode/Cloudflare (exit 75). Existing predictions were left untouched. Do NOT re-run immediately — that deepens the block; wait for the next scheduled crawl."
-          else
-            echo "::error::crawl failed with exit code $code (not a transient block)"
-          fi
-          exit $code
+  attempt-2:
+    name: Attempt 2 (fresh runner)
+    needs: attempt-1
+    if: needs.attempt-1.outputs.outcome == 'blocked'
+    uses: ./.github/workflows/crawl-attempt.yml
+    with:
+      attempt: 2
+    secrets: inherit
+
+  attempt-3:
+    name: Attempt 3 (fresh runner)
+    needs: attempt-2
+    if: needs.attempt-2.outputs.outcome == 'blocked'
+    uses: ./.github/workflows/crawl-attempt.yml
+    with:
+      attempt: 3
+    secrets: inherit
+
+  attempt-4:
+    name: Attempt 4 (fresh runner, final)
+    needs: attempt-3
+    if: needs.attempt-3.outputs.outcome == 'blocked'
+    uses: ./.github/workflows/crawl-attempt.yml
+    with:
+      attempt: 4
+      final: true
+    secrets: inherit

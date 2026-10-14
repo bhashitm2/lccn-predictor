@@ -113,6 +113,35 @@ def _parse_row(raw: dict) -> Optional[RankingRow]:
     )
 
 
+def _normalize_rank_base(by_page: Dict[int, List[RankingRow]], slug: str) -> None:
+    """Shift ranks in place so first place is 1, whatever the API's convention.
+
+    The engine expects 1-based finishing positions, but leetcode.com reports a
+    0-based ``rank`` (first place is ``0``) while leetcode.cn reports 1-based.
+    Fed a 0, the Elo step computes ``sqrt(expected_rank * 0)`` and sends the
+    winner's expected rating to the search cap; everyone else is scored one
+    place too well. The base is read off the data rather than assumed per host,
+    from the first fetched page, so a missing page 1 doesn't defeat it.
+    """
+    pages = [p for p in sorted(by_page) if by_page[p]]
+    if not pages:
+        return
+    first = pages[0]
+    base = min(r.rank for r in by_page[first]) - (first - 1) * PAGE_SIZE
+    if base == 1:
+        return
+    if base != 0:
+        logger.warning(
+            f"unexpected rank base {base} for {slug} (page {first}); "
+            "leaving ranks as reported"
+        )
+        return
+    logger.info(f"{slug}: API ranks are 0-based; shifting to 1-based")
+    for page in pages:
+        for row in by_page[page]:
+            row.rank += 1
+
+
 async def fetch_ranking(
     slug: str,
     user_num: int,
@@ -190,6 +219,7 @@ async def fetch_ranking(
                 progress_cb(fetched_rows)
         pending = failed
 
+    _normalize_rank_base(by_page, slug)
     rows: List[RankingRow] = [row for page in sorted(by_page) for row in by_page[page]]
     rows.sort(key=lambda r: r.rank)
     if limit:

@@ -147,12 +147,23 @@ only serves cached results. Fully free, fully automated, no proxy, no always-on 
    (`LCCN_PUBLIC_CRAWL_ENABLED` stays `false` — the host never crawls, it only serves.)
 3. **Crawler — GitHub Actions (free).**
    [`.github/workflows/crawl-cron.yml`](.github/workflows/crawl-cron.yml) runs after
-   each contest, crawls via `python -m predictor.cli predict-latest`, and writes to
+   each contest, crawls via `python -m predictor.cli predict-recent`, and writes to
    Atlas. Add **one** repo secret: `LCCN_MONGODB_URI` (same Atlas string). Trigger a
    first run manually from the **Actions** tab (optionally with a `slug` / `limit`).
 
-   Four schedules: one crawl shortly after each contest type ends, plus a forced
-   re-crawl ~24 h later once LeetCode's cheater purge and rating updates settle.
+   Four schedules: one crawl shortly after each contest type ends, plus a
+   re-crawl of that contest type ~24 h later once LeetCode's cheater purge
+   settles. Every slot also predicts any contest from the last 72 h that is
+   still missing, so a slot that got blocked is picked up by the next one.
+
+   > **Blocked runner? Try another one.** Cloudflare refuses many GitHub runner
+   > IPs outright — the very first ranking request comes back 403 before the
+   > run has sent anything. Retrying from the *same* IP only deepens that, but
+   > each job gets a fresh VM with a different IP. So a run that is refused
+   > (exit 75) is retried as a new job, up to 4 attempts per slot
+   > ([`crawl-attempt.yml`](.github/workflows/crawl-attempt.yml)). Blocked
+   > attempts end green with a warning; the run (and its failure email) only
+   > fails once every attempt was refused.
 
    > **Crawl politely.** A full contest is ~1,600 ranking pages. LeetCode sits
    > behind Cloudflare, and the request *rate* — not the concurrency — is what
