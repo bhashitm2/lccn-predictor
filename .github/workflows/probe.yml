@@ -1,0 +1,34 @@
+name: Probe LeetCode access
+
+# Diagnostic only: from ONE runner, send a single request per contest/endpoint
+# and log the status plus who answered (Cloudflare edge vs LeetCode). Tells an
+# IP-wide block apart from a contest-specific refusal. No database access, no
+# writes, a dozen requests in total. Run manually from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:
+        description: "Space-separated contest slugs, probed in order"
+        required: false
+        default: "weekly-contest-523 biweekly-contest-193 biweekly-contest-192 weekly-contest-522"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+      - name: Runner egress IP
+        run: |
+          echo "egress IP: $(curl -fsS --max-time 10 https://checkip.amazonaws.com || echo unknown)"
+      - name: Probe
+        env:
+          SLUGS: ${{ github.event.inputs.slugs }}
+        # Word-splitting $SLUGS is intended: one argument per slug.
+        run: python -m predictor.probe $SLUGS
