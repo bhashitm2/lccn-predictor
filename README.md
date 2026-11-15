@@ -62,9 +62,11 @@ uvicorn predictor.main:app --reload
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| GET  | `/api/v1/contest/{slug}/predict` | **Main endpoint.** Paginated predicted records. Serves cached results; `202` if not ready yet. |
+| GET  | `/api/v1/contest/{slug}/predict` | **Main endpoint.** Paginated predicted records. Serves cached results; `202` while in progress, `404` if never queued. |
 | GET  | `/api/v1/contest/{slug}/user/{username}` | One participant's prediction. |
 | GET  | `/api/v1/contest/{slug}/status`  | Crawl/predict progress. |
+| GET  | `/api/v1/contests/resolve?q=` | Free-form input (`Weekly Contest 528`, `w528`, `bw 195`, `528`, a contest URL) to the canonical slug. |
+| GET  | `/api/v1/contests/recent?n=3` | The `n` most recently finished weekly/biweekly contests with their prediction status. |
 | GET  | `/healthz` | Liveness. |
 
 **Admin (require `X-API-Key: <LCCN_API_KEY>`):** trigger crawls — used by the scheduler / cron.
@@ -73,6 +75,8 @@ uvicorn predictor.main:app --reload
 | ------ | ---- | ------- |
 | POST | `/api/v1/admin/contest/{slug}/predict` | Crawl + predict a specific slug (`?force=`, `?limit=`). |
 | POST | `/api/v1/admin/predict-latest` | Resolve the most recently finished contest and predict it. |
+
+`{slug}` in the paths above also accepts the free-form forms `/contests/resolve` understands.
 
 **Query params for `/predict`:** `page` (default 1), `size` (1–500, default 50),
 `sort` (`rank`\|`delta`\|`new_rating`), `limit` (top-N only).
@@ -85,12 +89,14 @@ uvicorn predictor.main:app --reload
 
 ```js
 async function getPrediction(slug) {
-  // first call may return 202 (job started) — poll status, then re-fetch
+  // 202 = prediction in progress — poll, then re-fetch.
+  // 404 = this contest was never queued (e.g. an old contest or a typo).
   let res = await fetch(`https://your-host/api/v1/contest/${slug}/predict?size=100`);
   while (res.status === 202) {
     await new Promise(r => setTimeout(r, 2000));
     res = await fetch(`https://your-host/api/v1/contest/${slug}/predict?size=100`);
   }
+  if (!res.ok) throw new Error((await res.json()).detail);
   return res.json(); // { slug, status, total, page, size, records: [...] }
 }
 ```

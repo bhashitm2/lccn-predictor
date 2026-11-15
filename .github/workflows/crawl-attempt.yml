@@ -131,7 +131,18 @@ jobs:
           if [ $code -eq 75 ]; then
             echo "outcome=blocked" >> "$GITHUB_OUTPUT"
             if [ "$FINAL" = "true" ]; then
-              echo "::error::blocked by LeetCode/Cloudflare on every attempt (exit 75). Existing predictions were left untouched; the next scheduled slot will catch up."
+              # Every runner was refused. A later catch-up slot will retry, so
+              # only fail (and email) once a contest is actually overdue. The
+              # overdue check reads only MongoDB, so it works from this runner.
+              set +e
+              python -m predictor.cli overdue --hours 36
+              overdue=$?
+              set -e
+              if [ $overdue -eq 0 ]; then
+                echo "::warning::blocked by LeetCode/Cloudflare on every attempt (exit 75). Nothing is overdue yet; the next catch-up slot (every 3h) will retry."
+                exit 0
+              fi
+              echo "::error::blocked by LeetCode/Cloudflare on every attempt (exit 75), and a contest is still unpredicted 36h+ after it started (see the log above). Existing predictions were left untouched."
               exit 75
             fi
             echo "::warning::attempt ${{ inputs.attempt }} was blocked by LeetCode/Cloudflare (exit 75); retrying on a fresh runner."

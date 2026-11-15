@@ -29,12 +29,23 @@ name: Crawl & predict latest contest
 # Each slot tries up to four runners: if an attempt is refused by Cloudflare
 # (exit 75), the next attempt runs as a new job on a fresh VM with a different
 # IP. See crawl-attempt.yml for why that beats retrying in place.
+#
+# Catch-up slots: GitHub-hosted runner IPs are refused by Cloudflare often
+# enough that all four runners of a slot can be blocked (and GitHub has started
+# scheduled slots up to ~8h late). Two chances per contest wasn't enough, so a
+# catch-up slot runs every 3h from Saturday to Tuesday — the 72h window of both
+# contest kinds. Once everything is predicted it is a ~30s no-op.
+#
+# A slot where every runner was blocked only warns while a later slot can still
+# catch up; it fails (and GitHub emails) only when a contest is still missing
+# 36h after it started — see `predictor.cli overdue` in crawl-attempt.yml.
 on:
   schedule:
     - cron: "41 4 * * 0"    # weekly:   ~40m after it ends
     - cron: "13 4 * * 1"    # weekly:   ~+24h, refresh (post-purge, final)
     - cron: "41 16 * * 6"   # biweekly: ~40m after it ends
     - cron: "13 16 * * 0"   # biweekly: ~+24h, refresh (post-purge, final)
+    - cron: "47 */3 * * 0-2,6"  # catch-up for any slot that was blocked
   workflow_dispatch:
     inputs:
       slug:
