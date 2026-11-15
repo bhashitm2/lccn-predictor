@@ -37,3 +37,20 @@ class PredictionPage(BaseModel):
     page: int
     size: int
     records: List[PredictionRecord]
+
+
+class ResolvedContest(BaseModel):
+    query: str
+    slug: str
+    title: str
+    status: str  # status of the resolved slug: pending (never queued) | ... | done
+    candidates: List[str]
+
+
+class RecentContest(BaseModel):
+    slug: str
+    title: str
+    start_time: Optional[datetime] = None
+    status: str
+    total_records: int = 0
+    predicted_at: Optional[datetime] = None

@@ -10,6 +10,7 @@ Usage:
     python -m predictor.cli predict-latest [--force] [--limit N]
     python -m predictor.cli predict <slug> [--force] [--limit N]
     python -m predictor.cli backfill [--count N] [--force] [--limit N]
+    python -m predictor.cli overdue [--hours H]
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from predictor.crawler.contest_list import (
     fetch_past_contests,
 )
 from predictor.config import get_settings
+from predictor.core.contests import contests_started_between
 from predictor.crawler.http import CrawlBlockedError, close_http_session
 from predictor.db.models import Contest, utcnow
 from predictor.db.mongodb import close_db, init_db
@@ -133,6 +135,43 @@ async def _predict_recent(refresh: str | None, limit: int | None) -> int:
     return EXIT_OK
 
 
+async def _overdue_slugs(hours: float, now: datetime | None = None) -> list[str]:
+    """Weekly/biweekly contests that started more than ``hours`` ago, are still
+    inside predict-recent's catch-up window, and have no finished prediction.
+
+    Reads only MongoDB — the contest schedule is computed, not fetched — so it
+    still answers when LeetCode is refusing this runner.
+    """
+    settings = get_settings()
+    now = now or utcnow()
+    expected = contests_started_between(
+        now - timedelta(hours=settings.recent_contest_max_age_hours),
+        now - timedelta(hours=hours),
+    )
+    missing = []
+    for slug in expected:
+        contest = await Contest.find_one(Contest.title_slug == slug)
+        if contest is None or contest.status != "done":
+            missing.append(slug)
+    return missing
+
+
+async def _overdue(hours: float) -> int:
+    """Exit 1 if any contest is overdue (see ``_overdue_slugs``). The workflow
+    runs this after every runner was blocked: a block while a later slot can
+    still catch up is only a warning; an overdue contest is worth an alert."""
+    await init_db()
+    try:
+        missing = await _overdue_slugs(hours)
+        if missing:
+            logger.error(f"still not predicted {hours:g}h+ after start: {missing}")
+            return EXIT_FAILED
+        logger.info("nothing overdue")
+        return EXIT_OK
+    finally:
+        await close_db()
+
+
 def _predicted_before(contest: Contest, when: datetime) -> bool:
     predicted = contest.predicted_at
     if predicted is None:
@@ -194,7 +233,8 @@ async def _run_backfill(count: int, force: bool, limit: int | None) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="predictor.cli")
     parser.add_argument(
-        "command", choices=["predict-recent", "predict-latest", "predict", "backfill"]
+        "command",
+        choices=["predict-recent", "predict-latest", "predict", "backfill", "overdue"],
     )
     parser.add_argument("slug", nargs="?", default=None, help="contest slug")
     parser.add_argument("--force", action="store_true", help="re-predict if done")
@@ -208,7 +248,16 @@ def main() -> None:
         default=None,
         help="predict-recent: also re-predict done contests of this kind",
     )
+    parser.add_argument(
+        "--hours",
+        type=float,
+        default=36.0,
+        help="overdue: alert for contests that started at least this long ago",
+    )
     args = parser.parse_args()
+
+    if args.command == "overdue":
+        sys.exit(asyncio.run(_overdue(args.hours)))
 
     if args.command == "predict-recent":
         sys.exit(asyncio.run(_run_recent(args.refresh, args.limit)))

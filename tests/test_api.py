@@ -226,16 +226,29 @@ class _Resp:
 
 
 async def test_serve_only_does_not_crawl(db, monkeypatch):
-    """With public crawling disabled, an unknown slug returns 202 and creates no
-    contest doc (no crawl is started)."""
+    """With public crawling disabled, an unknown slug returns 404 (not a 202 that
+    clients would poll forever) and creates no contest doc (no crawl started)."""
     _patch_settings(monkeypatch, public_crawl_enabled=False)
     resp = _Resp()
+    with pytest.raises(HTTPException) as e:
+        await routes.predict_contest(
+            "never-crawled", resp, page=1, size=10, sort="rank", limit=None
+        )
+    assert e.value.status_code == 404
+    assert await Contest.find_one(Contest.title_slug == "never-crawled") is None
+
+
+async def test_serve_only_queued_contest_returns_202(db, monkeypatch):
+    """A contest the cron has queued but not finished still returns 202 so
+    clients keep polling."""
+    _patch_settings(monkeypatch, public_crawl_enabled=False)
+    await Contest(title_slug="weekly-contest-queued", status="crawling").insert()
+    resp = _Resp()
     page = await routes.predict_contest(
-        "never-crawled", resp, page=1, size=10, sort="rank", limit=None
+        "weekly-contest-queued", resp, page=1, size=10, sort="rank", limit=None
     )
     assert resp.status_code == 202
-    assert page.status == "pending" and page.total == 0
-    assert await Contest.find_one(Contest.title_slug == "never-crawled") is None
+    assert page.status == "crawling" and page.total == 0
 
 
 async def test_serve_only_serves_cached_after_admin(db, mock_crawler, monkeypatch):

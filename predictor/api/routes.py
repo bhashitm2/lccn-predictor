@@ -7,7 +7,8 @@ only and never start a live crawl.
 Admin (API-key gated): the scheduler / GitHub-Actions cron calls these to trigger
 crawling+prediction.
 """
-from typing import Optional
+from datetime import timedelta
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pymongo import ASCENDING, DESCENDING
@@ -15,11 +16,20 @@ from pymongo import ASCENDING, DESCENDING
 from predictor.api.deps import rate_limit, require_api_key
 from predictor.api.schemas import (
     ContestStatus,
+    RecentContest,
+    ResolvedContest,
     PredictionPage,
     PredictionRecord,
 )
 from predictor.config import get_settings
-from predictor.db.models import Contest, ContestRecord
+from predictor.core.contests import (
+    CONTEST_DURATION,
+    contest_title,
+    contests_started_between,
+    estimated_start,
+    parse_contest_query,
+)
+from predictor.db.models import Contest, ContestRecord, utcnow
 from predictor.service.predict_service import (
     ensure_prediction_started,
     predict_latest,
@@ -60,9 +70,92 @@ def _to_record(doc: ContestRecord) -> PredictionRecord:
     )
 
 
+async def resolve_contest(text: str) -> Tuple[Optional[str], List[str], Optional[Contest]]:
+    """Map free-form input to the slug it most likely means.
+
+    Returns ``(slug, candidates, contest_doc)``. Among the candidates (a bare
+    number means weekly *or* biweekly) the one with a finished prediction wins,
+    then the one with any prediction state, then the most recent; with nothing
+    in the DB the first candidate is returned so callers can report on it.
+    """
+    candidates = parse_contest_query(text)
+    if not candidates:
+        return None, [], None
+    found = [(slug, await Contest.find_one(Contest.title_slug == slug)) for slug in candidates]
+    existing = [(slug, doc) for slug, doc in found if doc is not None]
+    if not existing:
+        return candidates[0], candidates, None
+
+    def preference(item):
+        slug, doc = item
+        start = estimated_start(slug)
+        return (doc.status != "done", -(start.timestamp() if start else 0))
+
+    slug, doc = min(existing, key=preference)
+    return slug, candidates, doc
+
+
+async def _canonical(slug: str) -> str:
+    resolved, _, _ = await resolve_contest(slug)
+    return resolved or slug
+
+
 # --------------------------------------------------------------------------- #
 # Public, read-only endpoints
 # --------------------------------------------------------------------------- #
+@router.get(
+    "/contests/resolve",
+    response_model=ResolvedContest,
+    dependencies=[Depends(rate_limit)],
+)
+async def resolve(q: str = Query(..., min_length=1, max_length=200)):
+    """Turn what a person typed ("Weekly Contest 528", "w528", "bw 170", "528",
+    a leetcode.com contest URL, ...) into the canonical contest slug."""
+    slug, candidates, doc = await resolve_contest(q)
+    if slug is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Couldn't recognise '{q}' as a contest. Try e.g. "
+                "'weekly 528', 'biweekly 195' or 'weekly-contest-528'."
+            ),
+        )
+    return ResolvedContest(
+        query=q,
+        slug=slug,
+        title=contest_title(slug),
+        status=doc.status if doc else "pending",
+        candidates=candidates,
+    )
+
+
+@router.get(
+    "/contests/recent",
+    response_model=List[RecentContest],
+    dependencies=[Depends(rate_limit)],
+)
+async def recent_contests(n: int = Query(3, ge=1, le=10)):
+    """The ``n`` most recently finished weekly/biweekly contests, newest first,
+    each with its prediction status (``done`` means results are ready)."""
+    now = utcnow()
+    # Weekly + biweekly is 1.5 contests a week, so 8 weeks covers n<=10.
+    slugs = contests_started_between(now - timedelta(weeks=8), now - CONTEST_DURATION)
+    out = []
+    for slug in reversed(slugs[-n:]):
+        doc = await Contest.find_one(Contest.title_slug == slug)
+        out.append(
+            RecentContest(
+                slug=slug,
+                title=contest_title(slug),
+                start_time=estimated_start(slug),
+                status=doc.status if doc else "pending",
+                total_records=doc.total_records if doc else 0,
+                predicted_at=doc.predicted_at if doc else None,
+            )
+        )
+    return out
+
+
 @router.get(
     "/contest/{slug}/predict",
     response_model=PredictionPage,
@@ -78,22 +171,34 @@ async def predict_contest(
 ):
     """Predicted rating changes for a contest (paginated).
 
-    Serves **cached** results. If a prediction isn't ready, returns HTTP 202 with
-    the current status. By default it does NOT start a crawl — that is the
+    Serves **cached** results. If a prediction is in progress, returns HTTP 202
+    with the current status; if the contest was never queued, returns 404. By default it does NOT start a crawl — that is the
     scheduler/admin's job. (Set ``LCCN_PUBLIC_CRAWL_ENABLED=true`` to let this
     endpoint kick off crawls on demand, e.g. for local/testing.)
     """
     settings = get_settings()
+    slug = await _canonical(slug)
     contest = await Contest.find_one(Contest.title_slug == slug)
 
     if contest is None or contest.status != "done":
         if settings.public_crawl_enabled:
             contest = await ensure_prediction_started(slug, limit=limit)
-        if contest is None or contest.status != "done":
+        if contest is None:
+            # Never crawled and nothing will start a crawl from here, so a 202
+            # would leave clients polling forever. Say so explicitly instead.
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No prediction available for '{slug}'. Predictions are "
+                    "generated automatically for recent weekly/biweekly contests "
+                    "only — check the slug, or try a more recent contest."
+                ),
+            )
+        if contest.status != "done":
             response.status_code = 202
             return PredictionPage(
                 slug=slug,
-                status=contest.status if contest else "pending",
+                status=contest.status,
                 total=0,
                 page=page,
                 size=size,
@@ -131,6 +236,7 @@ async def predict_contest(
 )
 async def predict_user(slug: str, username: str):
     """A single participant's prediction (by username or user_slug)."""
+    slug = await _canonical(slug)
     contest = await Contest.find_one(Contest.title_slug == slug)
     if contest is None or contest.status != "done":
         raise HTTPException(status_code=404, detail="prediction not ready for this slug")
@@ -149,6 +255,7 @@ async def predict_user(slug: str, username: str):
     dependencies=[Depends(rate_limit)],
 )
 async def contest_status(slug: str):
+    slug = await _canonical(slug)
     contest = await Contest.find_one(Contest.title_slug == slug)
     if contest is None:
         return ContestStatus(slug=slug, status="pending")
