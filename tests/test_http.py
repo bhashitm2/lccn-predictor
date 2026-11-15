@@ -150,14 +150,16 @@ async def test_circuit_breaker_gate_releases_waiters():
 # --------------------------------------------------------------------------- #
 
 
-def _page_payload(page: int, per_page: int = 25):
+def _page_payload(page: int, per_page: int = 25, base: int = 1):
+    """One ranking page. ``base`` is the API's rank of first place: leetcode.cn
+    reports 1, leetcode.com reports 0."""
     return {
         "total_rank": [
             {
                 "username": f"u{(page - 1) * per_page + i}",
                 "user_slug": f"u{(page - 1) * per_page + i}",
                 "data_region": "US",
-                "rank": (page - 1) * per_page + i + 1,
+                "rank": (page - 1) * per_page + i + base,
                 "score": 10,
                 "finish_time": 1700000000,
             }
@@ -232,6 +234,35 @@ async def test_complete_crawl_returns_all_rows(stub_settings, stub_session):
 
     assert len(rows) == 500
     assert rows[0].rank == 1
+    assert rows[-1].rank == 500
+
+
+async def test_zero_based_ranks_are_shifted_to_one_based(stub_settings, stub_session):
+    """leetcode.com reports first place as rank 0; the engine needs 1-based."""
+    stub_settings(http_retry=1)
+    stub_session(
+        lambda url, n: StubResponse(200, _page_payload(_page_of(url), base=0))
+    )
+
+    rows = await fetch_ranking("weekly-contest-517", user_num=500)
+
+    assert [r.rank for r in rows] == list(range(1, 501))
+
+
+async def test_rank_base_is_detected_when_page_one_is_missing(
+    stub_settings, stub_session
+):
+    """The base is read from the first page that did arrive, not assumed."""
+    stub_settings(http_retry=0, repair_passes=0, min_ranking_coverage=0.9)
+    stub_session(
+        lambda url, n: StubResponse(500)
+        if _page_of(url) == 1
+        else StubResponse(200, _page_payload(_page_of(url), base=0))
+    )
+
+    rows = await fetch_ranking("weekly-contest-517", user_num=500)
+
+    assert rows[0].rank == 26
     assert rows[-1].rank == 500
 
 
