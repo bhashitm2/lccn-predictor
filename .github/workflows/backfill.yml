@@ -26,7 +26,16 @@ concurrency:
 
 jobs:
   backfill:
-    runs-on: ubuntu-latest
+    # Runner is selectable via the CRAWLER_RUNNER repo variable so the crawl can
+    # move to a dedicated IP without a code change. Unset => empty string =>
+    # falls back to ubuntu-latest, so nothing changes until you set it.
+    #
+    # SAFE HERE, AND ONLY HERE: this workflow is reachable only by
+    # `workflow_dispatch`, which a fork cannot trigger. This repo is
+    # PUBLIC, so any workflow a fork *can* trigger (i.e. ci.yml, on
+    # pull_request) must never run on a self-hosted runner — a fork PR would
+    # execute arbitrary code on your box. Do not "tidy" this into a shared value.
+    runs-on: ${{ vars.CRAWLER_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v5

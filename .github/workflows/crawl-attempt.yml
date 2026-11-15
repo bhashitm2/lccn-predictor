@@ -34,7 +34,16 @@ on:
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
+    # Runner is selectable via the CRAWLER_RUNNER repo variable so the crawl can
+    # move to a dedicated IP without a code change. Unset => empty string =>
+    # falls back to ubuntu-latest, so nothing changes until you set it.
+    #
+    # SAFE HERE, AND ONLY HERE: this workflow is only `workflow_call`ed by
+    # crawl-cron.yml, which runs on `schedule` and `workflow_dispatch` — neither
+    # of which a fork can trigger. This repo is PUBLIC, so any workflow a fork
+    # *can* trigger (i.e. ci.yml, on pull_request) must never run on a
+    # self-hosted runner, and this workflow must never be called from one.
+    runs-on: ${{ vars.CRAWLER_RUNNER || 'ubuntu-latest' }}
     # A full contest is ~1,600 ranking pages at a deliberately polite rate, plus
     # ratings, the Elo compute and the write to Atlas. A heavily throttled crawl
     # has needed ~1h50m before the write even started (weekly-contest-521 was
@@ -67,7 +76,11 @@ jobs:
           # control; the circuit breaker stops us hammering a closed door.
           LCCN_RANKING_CONCURRENCY: "4"
           LCCN_RATING_CONCURRENCY: "6"
-          LCCN_HTTP_RATE_LIMIT_PER_SECOND: "3"
+          # 3/s is tuned for a shared, already-suspect GitHub IP. On a
+          # dedicated runner set CRAWLER_RATE_LIMIT to ~8 (a full crawl drops
+          # from ~9 min to ~3.5). Everything below it protects data integrity,
+          # not the IP, and should be left alone.
+          LCCN_HTTP_RATE_LIMIT_PER_SECOND: ${{ vars.CRAWLER_RATE_LIMIT || '3' }}
           LCCN_HTTP_RETRY: "5"
           LCCN_HTTP_BLOCK_THRESHOLD: "12"
           LCCN_HTTP_BLOCK_COOLDOWN_SECONDS: "300"

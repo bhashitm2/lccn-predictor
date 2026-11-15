@@ -5,6 +5,11 @@ name: Crawl & predict latest contest
 # cloud hosts (e.g. Render) get 403'd. It writes predictions straight to MongoDB
 # Atlas; the deployed API then serves those cached results.
 #
+# On a GitHub-hosted runner that IP is a coin flip: runners share Azure ranges
+# that Cloudflare scores poorly, and a refused run is refused on its very first
+# request. Set the CRAWLER_RUNNER repo variable to move the crawl onto a
+# dedicated IP — see docs/self-hosted-runner.md.
+#
 # Required repository secret:
 #   LCCN_MONGODB_URI   the same MongoDB Atlas connection string the web host uses
 #
