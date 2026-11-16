@@ -54,3 +54,16 @@ class RecentContest(BaseModel):
     status: str
     total_records: int = 0
     predicted_at: Optional[datetime] = None
+
+
+class UserMatch(PredictionRecord):
+    position: int  # 1-based position in rank order
+    page: int  # the /predict page (rank order, for the requested size) holding this user
+
+
+class UserSearch(BaseModel):
+    slug: str
+    query: str
+    exact: bool  # True: matches are exact (case-insensitive); False: suggestions
+    size: int
+    matches: List[UserMatch]
