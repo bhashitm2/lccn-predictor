@@ -18,6 +18,8 @@ from predictor.api.schemas import (
     ContestStatus,
     RecentContest,
     ResolvedContest,
+    UserMatch,
+    UserSearch,
     PredictionPage,
     PredictionRecord,
 )
@@ -29,6 +31,7 @@ from predictor.core.contests import (
     estimated_start,
     parse_contest_query,
 )
+from predictor.core.users import contains_pattern, exact_pattern, normalize_user_query
 from predictor.db.models import Contest, ContestRecord, utcnow
 from predictor.service.predict_service import (
     ensure_prediction_started,
@@ -213,8 +216,10 @@ async def predict_contest(
 
     query = ContestRecord.find(ContestRecord.contest_slug == slug)
     total = await query.count()
+    # user_slug breaks ties (equal rank / delta), giving a stable order that
+    # the user search below can compute page numbers against.
     docs = (
-        await query.sort((sort_field, direction))
+        await query.sort((sort_field, direction), ("user_slug", ASCENDING))
         .skip((page - 1) * size)
         .limit(size)
         .to_list()
@@ -229,24 +234,98 @@ async def predict_contest(
     )
 
 
-@router.get(
-    "/contest/{slug}/user/{username}",
-    response_model=PredictionRecord,
-    dependencies=[Depends(rate_limit)],
-)
-async def predict_user(slug: str, username: str):
-    """A single participant's prediction (by username or user_slug)."""
-    slug = await _canonical(slug)
+async def _done_contest(slug: str) -> Contest:
     contest = await Contest.find_one(Contest.title_slug == slug)
     if contest is None or contest.status != "done":
-        raise HTTPException(status_code=404, detail="prediction not ready for this slug")
-    doc = await ContestRecord.find_one(
+        raise HTTPException(
+            status_code=404, detail=f"No prediction is ready for '{slug}' yet."
+        )
+    return contest
+
+
+async def _with_page(slug: str, doc: ContestRecord, size: int) -> UserMatch:
+    """Attach the user's position in rank order and the /predict page that
+    holds them (same order /predict uses: rank, then user_slug)."""
+    ahead = await ContestRecord.find(
         ContestRecord.contest_slug == slug,
-        {"$or": [{"username": username}, {"user_slug": username}]},
+        {
+            "$or": [
+                {"rank": {"$lt": doc.rank}},
+                {"rank": doc.rank, "user_slug": {"$lt": doc.user_slug}},
+            ]
+        },
+    ).count()
+    return UserMatch(
+        **_to_record(doc).model_dump(), position=ahead + 1, page=ahead // size + 1
     )
-    if doc is None:
-        raise HTTPException(status_code=404, detail="user not found in this contest")
-    return _to_record(doc)
+
+
+async def _find_users(slug: str, q: str, limit: int) -> Tuple[bool, List[ContestRecord]]:
+    """Exact (case-insensitive) matches on user_slug or display name; failing
+    that, substring matches as suggestions. Display names are not unique, so
+    exact can still return several people — a user_slug match sorts first."""
+    exact = await ContestRecord.find(
+        ContestRecord.contest_slug == slug,
+        {"$or": [{"user_slug": exact_pattern(q)}, {"username": exact_pattern(q)}]},
+    ).sort(("rank", ASCENDING)).limit(limit).to_list()
+    if exact:
+        exact.sort(key=lambda d: (d.user_slug.lower() != q.lower(), d.rank))
+        return True, exact
+    similar = await ContestRecord.find(
+        ContestRecord.contest_slug == slug,
+        {"$or": [{"user_slug": contains_pattern(q)}, {"username": contains_pattern(q)}]},
+    ).sort(("rank", ASCENDING)).limit(limit).to_list()
+    return False, similar
+
+
+@router.get(
+    "/contest/{slug}/user/{username}",
+    response_model=UserMatch,
+    dependencies=[Depends(rate_limit)],
+)
+async def predict_user(slug: str, username: str, size: int = Query(50, ge=1, le=500)):
+    """A single participant's prediction, matched case-insensitively on
+    username or user_slug (a profile URL or "@name" works too). Also returns
+    which ``/predict`` page (for ``size``) holds them."""
+    slug = await _canonical(slug)
+    await _done_contest(slug)
+    q = normalize_user_query(username)
+    found, docs = await _find_users(slug, q, 1) if q else (False, [])
+    if not found:
+        raise HTTPException(
+            status_code=404, detail=f"'{q or username}' did not take part in {slug}."
+        )
+    return await _with_page(slug, docs[0], size)
+
+
+@router.get(
+    "/contest/{slug}/users/search",
+    response_model=UserSearch,
+    dependencies=[Depends(rate_limit)],
+)
+async def search_users(
+    slug: str,
+    q: str = Query(..., min_length=1, max_length=100),
+    size: int = Query(50, ge=1, le=500),
+    limit: int = Query(10, ge=1, le=25),
+):
+    """Find participants by username / user_slug / profile URL.
+
+    ``exact=true``: case-insensitive exact matches (several if people share a
+    display name). ``exact=false``: no exact match — ``matches`` are partial
+    matches to suggest. Each match carries its ``page`` for ``/predict``.
+    """
+    slug = await _canonical(slug)
+    await _done_contest(slug)
+    query = normalize_user_query(q)
+    exact, docs = await _find_users(slug, query, limit) if query else (False, [])
+    return UserSearch(
+        slug=slug,
+        query=query,
+        exact=exact,
+        size=size,
+        matches=[await _with_page(slug, d, size) for d in docs],
+    )
 
 
 @router.get(

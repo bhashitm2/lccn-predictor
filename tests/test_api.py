@@ -105,14 +105,14 @@ async def test_sort_by_delta(db, mock_crawler):
 
 async def test_single_user_lookup(db, mock_crawler):
     await predict_service.run_prediction("weekly-contest-test")
-    rec = await routes.predict_user("weekly-contest-test", "user1")
+    rec = await routes.predict_user("weekly-contest-test", "user1", size=50)
     assert rec.username == "user1"
     assert rec.rank == 1
 
 
 async def test_user_lookup_404_when_not_ready(db):
     with pytest.raises(Exception):
-        await routes.predict_user("nonexistent-contest", "user1")
+        await routes.predict_user("nonexistent-contest", "user1", size=50)
 
 
 async def test_status_pending_for_unknown(db):

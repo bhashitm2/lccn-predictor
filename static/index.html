@@ -70,6 +70,24 @@
     .contest .s.ready { color: var(--green); }
     .contest .s.wait { color: var(--muted); }
     h2 { font-size: 1rem; margin: 0 0 12px; }
+    #userResult:empty { display: none; }
+    #userResult { margin-top: 14px; }
+    .me-card {
+      border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline;
+    }
+    .me-card .who { font-weight: 600; font-size: 1.02rem; }
+    .me-card .k { font-size: .75rem; color: var(--muted); margin-right: 4px; }
+    .me-card .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .chip {
+      background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 999px; padding: 5px 12px; font-size: .85rem; font-weight: 400;
+    }
+    .chip:hover { border-color: var(--accent); }
+    .chip small { color: var(--muted); }
+    .note { font-size: .88rem; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -90,8 +108,8 @@
           <input id="slug" placeholder="e.g. weekly 528, biweekly 195, w528" />
         </div>
         <div class="field">
-          <label>Highlight user (optional)</label>
-          <input id="user" class="small" placeholder="username" />
+          <label for="user">Find a user (optional)</label>
+          <input id="user" placeholder="username or profile link" />
         </div>
         <div class="field">
           <label>Top-N only (optional)</label>
@@ -100,6 +118,7 @@
         <button id="go">Predict</button>
       </div>
       <div id="status" class="status"></div>
+      <div id="userResult"></div>
       <div class="hint">Type a contest any way you like — <code>Weekly Contest 528</code>,
         <code>w528</code>, <code>bw 195</code>, <code>528</code>, or paste its leetcode.com link.</div>
       <div class="hint">Tip: predictions are most accurate right after a contest ends,
@@ -133,7 +152,7 @@
     const API = (window.API_BASE || "").replace(/\/$/, "");
     const $ = (id) => document.getElementById(id);
     const PAGE_SIZE = 50;
-    let state = { slug: "", page: 1, total: 0 };
+    let state = { slug: "", page: 1, total: 0, focus: null };
 
     const setStatus = (msg, isErr = false) => {
       const el = $("status");
@@ -215,14 +234,13 @@
 
     function render(data) {
       state.total = data.total;
-      const me = $("user").value.trim().toLowerCase();
       const fmt = (x) => x == null ? "—" : Math.round(x);
       $("tbody").innerHTML = data.records.map((rec) => {
         const d = rec.delta_rating ?? 0;
         const cls = d > 0 ? "delta-up" : d < 0 ? "delta-down" : "";
         const sign = d > 0 ? "+" : "";
-        const isMe = me && (rec.username.toLowerCase() === me || rec.user_slug.toLowerCase() === me);
-        return `<tr class="${isMe ? "me" : ""}">
+        const isMe = state.focus && rec.user_slug === state.focus;
+        return `<tr class="${isMe ? "me" : ""}"${isMe ? ' id="meRow"' : ""}>
           <td class="num">${rec.rank}</td>
           <td>${esc(rec.username)}</td>
           <td><span class="pill">${esc(rec.data_region)}</span></td>
@@ -248,19 +266,98 @@
       return r.json();
     }
 
-    async function run(page = 1, slug = null) {
+    const signed = (d) => d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(1)}`;
+
+    function userCard(m) {
+      const d = m.delta_rating ?? 0;
+      const cls = d > 0 ? "delta-up" : d < 0 ? "delta-down" : "";
+      const r = (x) => x == null ? "—" : Math.round(x);
+      const handle = m.user_slug !== m.username ? ` <small class="note">@${esc(m.user_slug)}</small>` : "";
+      return `<div class="me-card">
+        <span class="who">${esc(m.username)}${handle} <span class="pill">${esc(m.data_region)}</span></span>
+        <span><span class="k">Rank</span><span class="v">#${m.rank.toLocaleString()}</span></span>
+        <span><span class="k">Rating</span><span class="v">${r(m.old_rating)} → ${r(m.new_rating)}</span></span>
+        <span><span class="k">Change</span><span class="v ${cls}">${signed(m.delta_rating)}</span></span>
+        <span><span class="k">Score</span><span class="v">${m.score}</span></span>
+      </div>`;
+    }
+
+    const chip = (m) => `<button class="chip" data-slug="${esc(m.user_slug)}">${esc(m.username)}
+      <small>@${esc(m.user_slug)} · #${m.rank.toLocaleString()}</small></button>`;
+
+    // Find `who` anywhere in the contest (not just the visible page). Renders the
+    // result box and returns the match to jump to, or null.
+    async function findUser(slug, who) {
+      const q = new URLSearchParams({ q: who, size: PAGE_SIZE });
+      const r = await apiFetch(`/api/v1/contest/${encodeURIComponent(slug)}/users/search?` + q);
+      if (!r.ok) throw await errorFrom(r);
+      const res = await r.json();
+      const box = $("userResult");
+      const title = $("slug").dataset.title || slug;
+      if (!res.matches.length) {
+        box.innerHTML = `<div class="note">No participant matching “${esc(res.query)}” in ${esc(title)}.
+          Check the spelling, or that they took part in this contest.</div>`;
+        return null;
+      }
+      if (!res.exact) {
+        box.innerHTML = `<div class="note">No exact match for “${esc(res.query)}”. Did you mean:</div>
+          <div class="chips">${res.matches.map(chip).join("")}</div>`;
+        wireChips(box, res.matches, slug);
+        return null;
+      }
+      showMatch(res.matches[0], res.matches, slug);
+      return res.matches[0];
+    }
+
+    function showMatch(m, all, slug) {
+      const box = $("userResult");
+      const others = all.filter((o) => o.user_slug !== m.user_slug);
+      box.innerHTML = userCard(m) + (others.length
+        ? `<div class="note" style="margin-top:8px">Others with this name:</div>
+           <div class="chips">${others.map(chip).join("")}</div>` : "");
+      wireChips(box, all, slug);
+    }
+
+    function wireChips(box, all, slug) {
+      box.querySelectorAll(".chip").forEach((b) => {
+        b.onclick = async () => {
+          const m = all.find((o) => o.user_slug === b.dataset.slug);
+          $("user").value = m.user_slug;
+          state.focus = m.user_slug;
+          showMatch(m, all, slug);
+          await run(m.page, slug, false);
+        };
+      });
+    }
+
+    async function run(page = 1, slug = null, searchUser = true) {
       $("go").disabled = true;
       try {
         if (!slug) {
           const text = $("slug").value.trim();
           if (!text) { setStatus("Enter a contest, e.g. weekly 528.", true); return; }
           setStatus("Looking up contest…");
-          slug = (await resolveSlug(text)).slug;
+          const resolved = await resolveSlug(text);
+          slug = resolved.slug;
+          $("slug").dataset.title = resolved.title;
         }
-        state.slug = slug; state.page = page;
+        state.slug = slug;
+        const who = $("user").value.trim();
+        if (searchUser) { state.focus = null; $("userResult").innerHTML = ""; }
         setStatus("Requesting prediction…");
-        const data = await loadPage(slug, page);
+        let data = await loadPage(slug, page);
+        if (searchUser && who) {
+          setStatus(`Finding ${who}…`);
+          const m = await findUser(slug, who);
+          if (m) {
+            state.focus = m.user_slug;
+            if (m.page !== data.page) data = await loadPage(slug, m.page);
+          }
+        }
+        state.page = data.page;
         render(data);
+        const row = document.getElementById("meRow");
+        if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
         setStatus(`Done — status: ${data.status}.`);
       } catch (e) {
         setStatus(e.message, true);
@@ -271,8 +368,10 @@
 
     $("go").onclick = () => run(1);
     $("slug").addEventListener("keydown", (e) => { if (e.key === "Enter") run(1); });
-    $("prev").onclick = () => run(state.page - 1, state.slug);
-    $("next").onclick = () => run(state.page + 1, state.slug);
+    $("user").addEventListener("keydown", (e) => { if (e.key === "Enter") run(1, state.slug || null); });
+    $("slug").addEventListener("input", () => { state.slug = ""; });
+    $("prev").onclick = () => run(state.page - 1, state.slug, false);
+    $("next").onclick = () => run(state.page + 1, state.slug, false);
 
     const BUSY = { crawling: "Crawling now…", resolving: "Resolving ratings…", predicting: "Predicting…" };
 
@@ -297,7 +396,11 @@
           </button>`;
         }).join("");
         box.querySelectorAll("button.contest:not(:disabled)").forEach((b) => {
-          b.onclick = () => { $("slug").value = b.dataset.slug; run(1, b.dataset.slug); };
+          b.onclick = () => {
+            $("slug").value = b.dataset.slug;
+            $("slug").dataset.title = b.querySelector(".t").textContent;
+            run(1, b.dataset.slug);
+          };
         });
         const latest = list.find((c) => c.status === "done");
         if (latest && !$("slug").value) $("slug").placeholder = `e.g. ${latest.slug}`;

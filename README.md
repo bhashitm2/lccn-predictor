@@ -63,7 +63,8 @@ uvicorn predictor.main:app --reload
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET  | `/api/v1/contest/{slug}/predict` | **Main endpoint.** Paginated predicted records. Serves cached results; `202` while in progress, `404` if never queued. |
-| GET  | `/api/v1/contest/{slug}/user/{username}` | One participant's prediction. |
+| GET  | `/api/v1/contest/{slug}/user/{username}` | One participant's prediction (case-insensitive username / handle / profile URL), plus the `/predict` `page` that holds them. |
+| GET  | `/api/v1/contest/{slug}/users/search?q=` | Find participants: exact matches (several if people share a display name), else partial-match suggestions — each with its `page`. |
 | GET  | `/api/v1/contest/{slug}/status`  | Crawl/predict progress. |
 | GET  | `/api/v1/contests/resolve?q=` | Free-form input (`Weekly Contest 528`, `w528`, `bw 195`, `528`, a contest URL) to the canonical slug. |
 | GET  | `/api/v1/contests/recent?n=3` | The `n` most recently finished weekly/biweekly contests with their prediction status. |
